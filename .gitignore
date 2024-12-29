@@ -1,6 +1,7 @@
 build
 .git
-node_modules
-# build
+node_modules/
+dist/
+.env
 *.tgz
 .DS_Store
