@@ -1,4 +1,4 @@
-import { EufyClean } from "./src";
+import { EufyClean } from "./original/src";
 import dotenv from "dotenv";
 
 // Load environment variables
