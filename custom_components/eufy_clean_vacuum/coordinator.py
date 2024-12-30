@@ -126,16 +126,24 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 if device_sn:
                     dps = device.get("dps", {})
                     _LOGGER.info(
-                        "Processing cloud device - SN: %s, Name: %s, Model: %s, DPS: %s",
+                        "Processing cloud device - SN: %s, Name: %s, Model: %s\n"
+                        "- DPS: %s\n"
+                        "- DPS Keys: %s",
                         device_sn,
                         device.get("deviceName", "Unknown"),
                         device.get("deviceModel", "Unknown"),
-                        dps
+                        dps,
+                        list(dps.keys()) if dps else []
                     )
 
                     # Get state from DPS data
                     work_status = dps.get("15") or dps.get("153")  # Try both legacy and novel DPS IDs
                     battery_level = dps.get("104") or dps.get("163")  # Try both legacy and novel DPS IDs
+
+                    # Check for novel API
+                    is_novel = any(k in dps for k in ["152", "153", "154", "155", "158", "160", "163", "173", "177"])
+                    if is_novel:
+                        _LOGGER.info("Novel API detected for cloud device %s", device_sn)
 
                     devices[device_sn] = {
                         "device_id": device_sn,  # Keep device_id for backward compatibility
@@ -146,8 +154,9 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         "battery_level": battery_level or 0,
                         "state": work_status or "unknown",
                         "is_online": device.get("online", False),
-                        "raw_state": device.get("raw_data", {}),
-                        "dps": dps
+                        "raw_state": device,
+                        "dps": dps,
+                        "is_novel_api": is_novel
                     }
                 else:
                     _LOGGER.warning("Found cloud device without SN: %s", device)
@@ -158,16 +167,24 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 if device_sn and device_sn not in devices:
                     dps = device.get("dps", {})
                     _LOGGER.info(
-                        "Processing MQTT device - SN: %s, Name: %s, Model: %s, DPS: %s",
+                        "Processing MQTT device - SN: %s, Name: %s, Model: %s\n"
+                        "- DPS: %s\n"
+                        "- DPS Keys: %s",
                         device_sn,
                         device.get("deviceName", "Unknown"),
                         device.get("deviceModel", "Unknown"),
-                        dps
+                        dps,
+                        list(dps.keys()) if dps else []
                     )
 
                     # Get state from DPS data
                     work_status = dps.get("15") or dps.get("153")  # Try both legacy and novel DPS IDs
                     battery_level = dps.get("104") or dps.get("163")  # Try both legacy and novel DPS IDs
+
+                    # Check for novel API
+                    is_novel = any(k in dps for k in ["152", "153", "154", "155", "158", "160", "163", "173", "177"])
+                    if is_novel:
+                        _LOGGER.info("Novel API detected for MQTT device %s", device_sn)
 
                     devices[device_sn] = {
                         "device_id": device_sn,  # Keep device_id for backward compatibility
@@ -179,7 +196,8 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         "state": work_status or "unknown",
                         "is_online": True,  # MQTT devices are always online when we receive data
                         "raw_state": device,
-                        "dps": dps
+                        "dps": dps,
+                        "is_novel_api": is_novel
                     }
                 else:
                     if not device_sn:
@@ -190,13 +208,20 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             _LOGGER.info("Total devices after update: %d", len(devices))
             for device_sn, device in devices.items():
                 _LOGGER.info(
-                    "Device status - SN: %s, Name: %s, Type: %s, Online: %s, State: %s, DPS: %s",
+                    "Device status - SN: %s, Name: %s, Type: %s\n"
+                    "- Online: %s\n"
+                    "- State: %s\n"
+                    "- DPS: %s\n"
+                    "- DPS Keys: %s\n"
+                    "- Novel API: %s",
                     device_sn,
                     device.get("name", "Unknown"),
                     device.get("type", "unknown"),
                     device.get("is_online", False),
                     device.get("state", "unknown"),
-                    device.get("dps", {})
+                    device.get("dps", {}),
+                    list(device.get("dps", {}).keys()),
+                    device.get("is_novel_api", False)
                 )
 
             self._data = {"devices": devices}

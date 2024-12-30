@@ -46,7 +46,7 @@ class MQTTConnect:
 
     def _on_subscribe(self, client: mqtt.Client, userdata: Any, mid: int, granted_qos: tuple) -> None:
         """Handle subscription confirmations."""
-        _LOGGER.debug("MQTT Subscribed with message ID: %s, QoS: %s", mid, granted_qos)
+        _LOGGER.info("MQTT Subscription confirmed - Message ID: %s, Granted QoS: %s", mid, granted_qos)
 
     def _on_publish(self, client: mqtt.Client, userdata: Any, mid: int) -> None:
         """Handle publish confirmations."""
@@ -56,26 +56,20 @@ class MQTTConnect:
         """Handle connection established."""
         if rc == 0:
             self.connected = True
-            _LOGGER.debug("Connected to MQTT broker with flags: %s", flags)
+            _LOGGER.info("Connected to MQTT broker with flags: %s", flags)
 
             # Subscribe to response topic
             if self.device_model:
-                # Subscribe to both response and state topics for the specific model
-                topics = [
-                    (f"cmd/eufy_home/{self.device_model}/+/res", 0),
-                    (f"state/eufy_home/{self.device_model}/+", 0),
-                    (f"smart/mb/in/+", 0)  # Additional topic from TypeScript code
-                ]
-                _LOGGER.debug("Subscribing to topics: %s", topics)
-                client.subscribe(topics)
+                # Subscribe to command response topic only, as per TypeScript implementation
+                topic = f"cmd/eufy_home/{self.device_model}/{self.deviceId}/res"
+                _LOGGER.info("Subscribing to device-specific topic: %s", topic)
+                result, mid = client.subscribe(topic, 0)
+                if result == mqtt.MQTT_ERR_SUCCESS:
+                    _LOGGER.info("Successfully subscribed to %s with message ID %s", topic, mid)
+                else:
+                    _LOGGER.warning("Failed to subscribe to %s (Result: %s)", topic, result)
             else:
-                _LOGGER.warning("No device model available, subscribing to all topics")
-                topics = [
-                    ("cmd/eufy_home/+/+/res", 0),
-                    ("state/eufy_home/+/+", 0),
-                    ("smart/mb/in/+", 0)
-                ]
-                client.subscribe(topics)
+                _LOGGER.warning("No device model available, cannot subscribe to specific topics")
         else:
             self.connected = False
             _LOGGER.error("Failed to connect to MQTT broker with result code %s", rc)
@@ -100,26 +94,13 @@ class MQTTConnect:
             topic_parts = msg.topic.split("/")
             device_id = None
 
-            if "smart/mb/in" in msg.topic:
-                device_id = topic_parts[-1]
-                _LOGGER.info("Smart topic message for device: %s", device_id)
-            elif len(topic_parts) >= 4:
+            if len(topic_parts) >= 4:
                 device_id = topic_parts[3]
-                _LOGGER.info("Standard topic message for device: %s", device_id)
+                _LOGGER.info("Processing message for device: %s", device_id)
 
-            if device_id:
-                _LOGGER.info("Processing message for device ID: %s", device_id)
-
-                # Handle both state and command response messages
-                if "state" in topic_parts[0]:
-                    _LOGGER.info("Processing state message")
-                    data = payload
-                elif "payload" in payload and "data" in payload["payload"]:
-                    _LOGGER.info("Processing command response message")
-                    data = payload["payload"]["data"]
-                else:
-                    _LOGGER.warning("Unexpected message format: %s", payload)
-                    return
+            if device_id and "payload" in payload and "data" in payload["payload"]:
+                data = payload["payload"]["data"]
+                _LOGGER.info("Processing data: %s", data)
 
                 # Extract DPS data
                 dps = data.get("dps", {})
@@ -129,13 +110,15 @@ class MQTTConnect:
                     "- Legacy Work Status (15): %s\n"
                     "- Novel Work Status (153): %s\n"
                     "- Legacy Battery (104): %s\n"
-                    "- Novel Battery (163): %s",
+                    "- Novel Battery (163): %s\n"
+                    "- All Keys: %s",
                     device_id,
                     dps,
                     dps.get("15"),
                     dps.get("153"),
                     dps.get("104"),
-                    dps.get("163")
+                    dps.get("163"),
+                    list(dps.keys()) if dps else []
                 )
 
                 device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
@@ -144,10 +127,19 @@ class MQTTConnect:
                     old_dps = device.get("dps", {})
                     _LOGGER.info("Old DPS data: %s", old_dps)
                     _LOGGER.info("New DPS data: %s", dps)
+
+                    # Update device data
                     device.update({
                         "dps": dps,
                         "last_update": int(time.time() * 1000)
                     })
+
+                    # Check if we need to update API type
+                    if not hasattr(self, 'novel_api'):
+                        self.novel_api = False
+                    if not self.novel_api and any(k in dps for k in ["152", "153", "154", "155", "158", "160", "163", "173", "177"]):
+                        _LOGGER.info("Novel API detected for device %s", device_id)
+                        self.novel_api = True
                 else:
                     _LOGGER.info("Adding new device from MQTT: %s with DPS: %s", device_id, dps)
                     self.devices.append({
@@ -157,7 +149,7 @@ class MQTTConnect:
                         "last_update": int(time.time() * 1000)
                     })
             else:
-                _LOGGER.warning("Could not extract device ID from topic: %s", msg.topic)
+                _LOGGER.warning("Unexpected message format or missing device ID - Topic: %s, Payload: %s", msg.topic, payload)
         except json.JSONDecodeError as err:
             _LOGGER.error("Failed to decode MQTT message on topic %s: %s\nPayload: %s", msg.topic, err, msg.payload.decode())
         except Exception as err:
