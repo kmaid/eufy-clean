@@ -1,6 +1,10 @@
 """MQTT connection handler."""
 import logging
 import time
+import json
+import ssl
+import tempfile
+import os
 import paho.mqtt.client as mqtt
 from typing import Any, Dict, List, Optional
 
@@ -14,30 +18,63 @@ class MQTTConnect:
     def __init__(self, mqtt_config: Dict[str, Any]) -> None:
         """Initialize MQTT connection."""
         self.mqtt_config = mqtt_config
-        self.client = mqtt.Client(
-            client_id=f"android-{mqtt_config.get('app_name')}-eufy_android_{mqtt_config.get('user_id')}-{int(time.time())}"
-        )
-        self.client.username_pw_set(
-            username=mqtt_config.get("thing_name"),
-        )
-        # Convert certificate and private key from strings to files
-        cert_data = mqtt_config.get("certificate_pem", "").encode("utf-8")
-        key_data = mqtt_config.get("private_key", "").encode("utf-8")
+        client_id = f"android-{mqtt_config.get('app_name')}-eufy_android_{mqtt_config.get('user_id')}-{int(time.time())}"
+        self.client = mqtt.Client(client_id=client_id)
+        self.client.username_pw_set(username=mqtt_config.get("thing_name"))
 
-        self.client.tls_set(
-            certfile=None,
-            keyfile=None,
-            cert_reqs=mqtt.ssl.CERT_NONE,
-            tls_version=mqtt.ssl.PROTOCOL_TLS,
-            ciphers=None,
-        )
-        self.client.tls_insecure_set(True)
-        self.devices = []
+        # Create temporary files for certificates
+        self.cert_file = None
+        self.key_file = None
 
         # Set up callbacks
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.client.on_disconnect = self._on_disconnect
+
+        self.devices = []
+
+    def _setup_certificates(self) -> None:
+        """Set up certificates for TLS connection."""
+        try:
+            # Create temporary files for certificates
+            cert_data = self.mqtt_config.get("certificate_pem", "").encode("utf-8")
+            key_data = self.mqtt_config.get("private_key", "").encode("utf-8")
+
+            # Create temporary files
+            cert_fd, self.cert_file = tempfile.mkstemp()
+            key_fd, self.key_file = tempfile.mkstemp()
+
+            # Write certificate data
+            os.write(cert_fd, cert_data)
+            os.write(key_fd, key_data)
+
+            # Close file descriptors
+            os.close(cert_fd)
+            os.close(key_fd)
+
+            # Set up TLS with the certificate files
+            self.client.tls_set(
+                certfile=self.cert_file,
+                keyfile=self.key_file,
+                cert_reqs=ssl.CERT_REQUIRED,
+                tls_version=ssl.PROTOCOL_TLS,
+                ciphers=None,
+                ca_certs=None  # Use system CA certificates
+            )
+            self.client.tls_insecure_set(True)
+        except Exception as err:
+            self._cleanup_certificate_files()
+            raise CannotConnect(f"Failed to set up certificates: {err}")
+
+    def _cleanup_certificate_files(self) -> None:
+        """Clean up temporary certificate files."""
+        try:
+            if self.cert_file and os.path.exists(self.cert_file):
+                os.unlink(self.cert_file)
+            if self.key_file and os.path.exists(self.key_file):
+                os.unlink(self.key_file)
+        except Exception as err:
+            _LOGGER.error("Error cleaning up certificate files: %s", err)
 
     def _on_connect(self, client: mqtt.Client, userdata: Any, flags: Dict, rc: int) -> None:
         """Handle connection established."""
@@ -51,7 +88,18 @@ class MQTTConnect:
     def _on_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
         """Handle incoming MQTT message."""
         try:
-            _LOGGER.debug("Received message on topic %s: %s", msg.topic, msg.payload)
+            payload = json.loads(msg.payload.decode())
+            _LOGGER.debug("Received message on topic %s: %s", msg.topic, payload)
+
+            if msg.topic == "device/list":
+                self.devices = payload.get("devices", [])
+            elif msg.topic.startswith("device/"):
+                device_id = msg.topic.split("/")[1]
+                device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
+                if device:
+                    device.update(payload)
+                else:
+                    self.devices.append(payload)
         except Exception as err:
             _LOGGER.error("Error handling MQTT message: %s", err)
 
@@ -66,6 +114,9 @@ class MQTTConnect:
             if not endpoint:
                 raise CannotConnect("No MQTT endpoint available")
 
+            # Set up certificates before connecting
+            self._setup_certificates()
+
             self.client.connect(
                 endpoint,
                 port=8883,  # Use TLS port
@@ -75,6 +126,7 @@ class MQTTConnect:
             _LOGGER.debug("Successfully connected to MQTT broker")
         except Exception as err:
             _LOGGER.error("Error connecting to MQTT broker: %s", err)
+            self._cleanup_certificate_files()
             raise CannotConnect(f"Failed to connect to MQTT broker: {err}")
 
     async def disconnect(self) -> None:
@@ -85,6 +137,8 @@ class MQTTConnect:
             _LOGGER.debug("Successfully disconnected from MQTT broker")
         except Exception as err:
             _LOGGER.error("Error disconnecting from MQTT broker: %s", err)
+        finally:
+            self._cleanup_certificate_files()
 
     async def get_device_list(self) -> List[Dict[str, Any]]:
         """Get list of devices from MQTT."""
@@ -131,13 +185,13 @@ class MQTTConnect:
                     "timestamp": int(time.time() * 1000),
                     "version": "1.0.0.1",
                 },
-                "payload": payload,
+                "payload": json.dumps(payload),
             }
 
             _LOGGER.debug("Sending command to device %s: %s", device_id, payload)
             self.client.publish(
                 f"cmd/eufy_home/{device_id}/req",
-                str(mqtt_val)
+                json.dumps(mqtt_val)
             )
         except Exception as err:
             _LOGGER.error("Error sending command to device: %s", err)

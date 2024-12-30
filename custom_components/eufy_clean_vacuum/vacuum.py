@@ -42,17 +42,26 @@ async def async_setup_entry(
     entities = []
 
     for device in devices:
+        # Handle both MQTT and cloud devices
+        device_id = device.get("device_sn") or device.get("devId")
+        device_model = device.get("deviceModel", "")
+        device_name = device.get("deviceName", "")
+
+        if not device_id:
+            _LOGGER.warning("Device without ID found: %s", device)
+            continue
+
         config = {
-            "device_id": device["deviceId"],
-            "device_model": device["deviceModel"],
+            "device_id": device_id,
+            "device_model": device_model,
             "debug": False,
         }
         shared_connect = SharedConnect(config)
         entities.append(
             EufyCleanVacuum(
                 coordinator,
-                device["deviceId"],
-                device["deviceName"],
+                device_id,
+                device_name,
                 shared_connect,
             )
         )

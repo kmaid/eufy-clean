@@ -32,15 +32,39 @@ class EufyCleanApi:
 
     async def get_cloud_devices(self) -> List[Dict[str, Any]]:
         """Get cloud devices."""
-        return self.login.cloud_devices
+        devices = []
+        for device in self.login.cloud_devices:
+            device_id = device.get("devId")
+            if device_id:
+                devices.append({
+                    "device_sn": device_id,  # Use device_sn consistently
+                    "deviceModel": device.get("deviceModel", ""),
+                    "deviceName": device.get("alias_name") or device.get("device_name") or device.get("name", ""),
+                    "dps": device.get("dps", {}),
+                    "mqtt": False
+                })
+        return devices
 
     async def get_mqtt_devices(self) -> List[Dict[str, Any]]:
         """Get MQTT devices."""
-        return self.login.mqtt_devices
+        devices = []
+        for device in self.login.mqtt_devices:
+            device_id = device.get("device_sn")
+            if device_id:
+                devices.append({
+                    "device_sn": device_id,
+                    "deviceModel": device.get("deviceModel", ""),
+                    "deviceName": device.get("alias_name") or device.get("device_name") or device.get("name", ""),
+                    "dps": device.get("dps", {}),
+                    "mqtt": True
+                })
+        return devices
 
     async def get_all_devices(self) -> List[Dict[str, Any]]:
         """Get all devices."""
-        return [*self.login.cloud_devices, *self.login.mqtt_devices]
+        cloud_devices = await self.get_cloud_devices()
+        mqtt_devices = await self.get_mqtt_devices()
+        return [*cloud_devices, *mqtt_devices]
 
     async def get_device_status(self, device_id: str) -> Dict[str, Any]:
         """Get device status."""
@@ -56,7 +80,7 @@ class EufyCleanApi:
 
             # Fall back to cloud
             cloud_device = next(
-                (d for d in self.login.cloud_devices if d.get("id") == device_id), None
+                (d for d in self.login.cloud_devices if d.get("devId") == device_id), None
             )
             if cloud_device:
                 return {
