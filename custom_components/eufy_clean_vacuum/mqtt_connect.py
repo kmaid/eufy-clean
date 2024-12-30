@@ -5,12 +5,15 @@ import json
 import ssl
 import tempfile
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import paho.mqtt.client as mqtt
 from typing import Any, Dict, List, Optional
 
 from .exceptions import CannotConnect
 
 _LOGGER = logging.getLogger(__name__)
+_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 class MQTTConnect:
     """MQTT connection handler."""
@@ -33,46 +36,55 @@ class MQTTConnect:
 
         self.devices = []
 
-    def _setup_certificates(self) -> None:
+    async def _setup_certificates(self) -> None:
         """Set up certificates for TLS connection."""
         try:
             # Create temporary files for certificates
             cert_data = self.mqtt_config.get("certificate_pem", "").encode("utf-8")
             key_data = self.mqtt_config.get("private_key", "").encode("utf-8")
 
-            # Create temporary files
-            cert_fd, self.cert_file = tempfile.mkstemp()
-            key_fd, self.key_file = tempfile.mkstemp()
+            # Create temporary files in a thread
+            def create_cert_files():
+                cert_fd, cert_file = tempfile.mkstemp()
+                key_fd, key_file = tempfile.mkstemp()
+                os.write(cert_fd, cert_data)
+                os.write(key_fd, key_data)
+                os.close(cert_fd)
+                os.close(key_fd)
+                return cert_file, key_file
 
-            # Write certificate data
-            os.write(cert_fd, cert_data)
-            os.write(key_fd, key_data)
-
-            # Close file descriptors
-            os.close(cert_fd)
-            os.close(key_fd)
-
-            # Set up TLS with the certificate files
-            self.client.tls_set(
-                certfile=self.cert_file,
-                keyfile=self.key_file,
-                cert_reqs=ssl.CERT_REQUIRED,
-                tls_version=ssl.PROTOCOL_TLS,
-                ciphers=None,
-                ca_certs=None  # Use system CA certificates
+            self.cert_file, self.key_file = await asyncio.get_event_loop().run_in_executor(
+                _EXECUTOR, create_cert_files
             )
-            self.client.tls_insecure_set(True)
+
+            # Set up TLS in a thread
+            def setup_tls():
+                self.client.tls_set(
+                    certfile=self.cert_file,
+                    keyfile=self.key_file,
+                    cert_reqs=ssl.CERT_REQUIRED,
+                    tls_version=ssl.PROTOCOL_TLS,
+                    ciphers=None,
+                    ca_certs=None  # Use system CA certificates
+                )
+                self.client.tls_insecure_set(True)
+
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, setup_tls)
+
         except Exception as err:
-            self._cleanup_certificate_files()
+            await self._cleanup_certificate_files()
             raise CannotConnect(f"Failed to set up certificates: {err}")
 
-    def _cleanup_certificate_files(self) -> None:
+    async def _cleanup_certificate_files(self) -> None:
         """Clean up temporary certificate files."""
         try:
-            if self.cert_file and os.path.exists(self.cert_file):
-                os.unlink(self.cert_file)
-            if self.key_file and os.path.exists(self.key_file):
-                os.unlink(self.key_file)
+            def cleanup():
+                if self.cert_file and os.path.exists(self.cert_file):
+                    os.unlink(self.cert_file)
+                if self.key_file and os.path.exists(self.key_file):
+                    os.unlink(self.key_file)
+
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, cleanup)
         except Exception as err:
             _LOGGER.error("Error cleaning up certificate files: %s", err)
 
@@ -115,36 +127,46 @@ class MQTTConnect:
                 raise CannotConnect("No MQTT endpoint available")
 
             # Set up certificates before connecting
-            self._setup_certificates()
+            await self._setup_certificates()
 
-            self.client.connect(
-                endpoint,
-                port=8883,  # Use TLS port
-                keepalive=60
-            )
-            self.client.loop_start()
+            # Connect in a thread
+            def do_connect():
+                self.client.connect(
+                    endpoint,
+                    port=8883,  # Use TLS port
+                    keepalive=60
+                )
+                self.client.loop_start()
+
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_connect)
             _LOGGER.debug("Successfully connected to MQTT broker")
         except Exception as err:
             _LOGGER.error("Error connecting to MQTT broker: %s", err)
-            self._cleanup_certificate_files()
+            await self._cleanup_certificate_files()
             raise CannotConnect(f"Failed to connect to MQTT broker: {err}")
 
     async def disconnect(self) -> None:
         """Disconnect from MQTT broker."""
         try:
-            self.client.loop_stop()
-            self.client.disconnect()
+            def do_disconnect():
+                self.client.loop_stop()
+                self.client.disconnect()
+
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_disconnect)
             _LOGGER.debug("Successfully disconnected from MQTT broker")
         except Exception as err:
             _LOGGER.error("Error disconnecting from MQTT broker: %s", err)
         finally:
-            self._cleanup_certificate_files()
+            await self._cleanup_certificate_files()
 
     async def get_device_list(self) -> List[Dict[str, Any]]:
         """Get list of devices from MQTT."""
         try:
             # Subscribe to device list topic
-            self.client.subscribe("device/list")
+            def do_subscribe():
+                self.client.subscribe("device/list")
+
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_subscribe)
             return self.devices
         except Exception as err:
             _LOGGER.error("Error getting device list from MQTT: %s", err)
@@ -154,7 +176,10 @@ class MQTTConnect:
         """Get device by ID."""
         try:
             # Subscribe to device topic
-            self.client.subscribe(f"device/{device_id}")
+            def do_subscribe():
+                self.client.subscribe(f"device/{device_id}")
+
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_subscribe)
             device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
             return device
         except Exception as err:
@@ -188,11 +213,14 @@ class MQTTConnect:
                 "payload": json.dumps(payload),
             }
 
+            def do_publish():
+                self.client.publish(
+                    f"cmd/eufy_home/{device_id}/req",
+                    json.dumps(mqtt_val)
+                )
+
             _LOGGER.debug("Sending command to device %s: %s", device_id, payload)
-            self.client.publish(
-                f"cmd/eufy_home/{device_id}/req",
-                json.dumps(mqtt_val)
-            )
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_publish)
         except Exception as err:
             _LOGGER.error("Error sending command to device: %s", err)
             raise
