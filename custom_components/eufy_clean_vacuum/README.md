@@ -16,7 +16,7 @@ pip install eufy-clean
 
 ```python
 import asyncio
-from eufy_clean import EufyClean
+from .eufy_clean import EufyClean
 
 async def main():
     # Initialize with your Eufy account credentials

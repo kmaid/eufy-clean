@@ -1,3 +1,4 @@
+"""Base controller for Eufy Clean devices."""
 from typing import Dict, Optional, Union, Any
 from ..constants.devices import EUFY_CLEAN_X_SERIES
 from ..constants.state import WorkMode, Control
@@ -35,7 +36,7 @@ class Base:
         """Get control response."""
         try:
             if self.novel_api:
-                value = await decode('./proto/cloud/control.proto', 'ModeCtrlResponse', self.robovac_data['PLAY_PAUSE'])
+                value = await decode('control.proto', 'ModeCtrlResponse', self.robovac_data['PLAY_PAUSE'])
                 print('152 - control response', value)
                 return value or {}
             return None
@@ -50,7 +51,7 @@ class Base:
         """Get current work mode."""
         try:
             if self.novel_api:
-                values = await get_multi_data('./proto/cloud/work_status.proto', 'WorkStatus', self.robovac_data['WORK_MODE'])
+                values = await get_multi_data('work_status.proto', 'WorkStatus', self.robovac_data['WORK_MODE'])
                 mode = next((v for v in values if v['key'] == 'Mode'), None)
                 return str(mode.get('value', '')).lower() if mode else 'auto'
             return str(self.robovac_data.get('WORK_MODE', '')).lower()
@@ -65,7 +66,7 @@ class Base:
         """Get current error code."""
         try:
             if self.novel_api:
-                value = await decode('./proto/cloud/error_code.proto', 'ErrorCode', self.robovac_data['ERROR_CODE'])
+                value = await decode('error_code.proto', 'ErrorCode', self.robovac_data['ERROR_CODE'])
                 if value and value.get('warn'):
                     return value['warn'][0]
                 return 0
@@ -102,7 +103,7 @@ class Base:
         value = True
 
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'autoClean': {
                     'cleanTimes': 1
                 }
@@ -124,7 +125,7 @@ class Base:
         increment = 3  # Scene 1 is 4, Scene 2 is 5, Scene 3 is 6 etc.
 
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'method': Control.START_SCENE_CLEAN,
                 'sceneClean': {
                     'sceneId': scene_id + increment
@@ -138,7 +139,7 @@ class Base:
         value = True
 
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'method': Control.RESUME_TASK
             })
 
@@ -149,7 +150,7 @@ class Base:
         value = False
 
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'method': Control.PAUSE_TASK
             })
 
@@ -160,7 +161,7 @@ class Base:
         value = False
 
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'method': Control.STOP_TASK
             })
 
@@ -169,7 +170,7 @@ class Base:
     async def go_home(self) -> None:
         """Send robot back to charging dock."""
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'method': Control.START_GOHOME
             })
             return await self.send_command({self.dps_map['PLAY_PAUSE']: value})
@@ -179,7 +180,7 @@ class Base:
     async def spot_clean(self) -> None:
         """Start spot cleaning."""
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'method': Control.START_SPOT_CLEAN
             })
             return await self.send_command({self.dps_map['PLAY_PAUSE']: value})
@@ -187,7 +188,7 @@ class Base:
     async def room_clean(self) -> None:
         """Start room cleaning."""
         if self.novel_api:
-            value = await encode('proto/cloud/control.proto', 'ModeCtrlRequest', {
+            value = await encode('control.proto', 'ModeCtrlRequest', {
                 'method': Control.START_SELECT_ROOMS_CLEAN
             })
             return await self.send_command({self.dps_map['PLAY_PAUSE']: value})
@@ -212,7 +213,7 @@ class Base:
         if not self.novel_api:
             return
 
-        clean_param_proto = await get_proto_file('proto/cloud/clean_param.proto')
+        clean_param_proto = await get_proto_file('clean_param.proto')
         clean_params = {
             'cleanType': clean_param_proto.lookup_type('CleanType').Value,
             'cleanExtent': clean_param_proto.lookup_type('CleanExtent').Value,
@@ -233,5 +234,5 @@ class Base:
 
         print('setCleanParam - requestParams', request_params)
 
-        value = await encode('proto/cloud/clean_param.proto', 'CleanParamRequest', request_params)
+        value = await encode('clean_param.proto', 'CleanParamRequest', request_params)
         await self.send_command({self.dps_map['CLEANING_PARAMETERS']: value})

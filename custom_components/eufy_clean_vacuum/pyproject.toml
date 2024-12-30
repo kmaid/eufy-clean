@@ -11,6 +11,7 @@ requests = "^2.31.0"
 python-dotenv = "^1.0.1"
 protobuf = "^4.25.3"
 paho-mqtt = "^1.6.1"
+homeassistant = "^2023.12.4"
 
 [build-system]
 requires = ["poetry-core"]

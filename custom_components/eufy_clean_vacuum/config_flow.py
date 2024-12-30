@@ -11,9 +11,8 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 
-from eufy_clean import EufyClean
-
 from .const import DOMAIN
+from .eufy_clean import EufyClean
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,7 +22,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_PASSWORD): str,
     }
 )
-
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Eufy Clean Vacuum."""

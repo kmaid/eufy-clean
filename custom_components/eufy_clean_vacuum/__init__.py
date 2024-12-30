@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN
-from eufy_clean import EufyClean
+from .eufy_clean import EufyClean
 
 _LOGGER = logging.getLogger(__name__)
 

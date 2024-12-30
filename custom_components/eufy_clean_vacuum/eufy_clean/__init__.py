@@ -6,6 +6,7 @@ import uuid
 from .controllers.login import EufyLogin
 from .controllers.mqtt_connect import MqttConnect
 from .controllers.local_connect import LocalConnect
+from .controllers.cloud_connect import CloudConnect
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -13,72 +14,48 @@ _LOGGER = logging.getLogger(__name__)
 class EufyClean:
     """Eufy Clean API client."""
 
-    def __init__(self, username: str, password: str):
-        """Initialize the API client."""
-        self.username = username
-        self.password = password
-        self.openudid = str(uuid.uuid4())
-        self.eufy_login = EufyLogin(username, password, self.openudid)
-        self.mqtt_connect = None
-        self.local_connect = None
-        self.cloud_devices = []
-        self.mqtt_devices = []
+    def __init__(self, username: str, password: str, openudid: Optional[str] = None):
+        """Initialize Eufy Clean API client.
+
+        Args:
+            username: Eufy account email
+            password: Eufy account password
+            openudid: Optional unique device identifier
+        """
+        if not openudid:
+            openudid = str(uuid.uuid4())
+
+        self.eufy_login = EufyLogin(username, password, openudid)
+        self.mqtt_connect: Optional[MqttConnect] = None
 
     async def init(self) -> None:
-        """Initialize the connection."""
+        """Initialize connection and fetch device lists."""
         await self.eufy_login.init()
-        self.cloud_devices = self.eufy_login.cloud_devices
-        self.mqtt_devices = self.eufy_login.mqtt_devices
 
-        # Initialize MQTT connection if we have devices
-        if self.mqtt_devices:
-            mqtt_creds = await self.eufy_login.get_mqtt_credentials()
-            if mqtt_creds:
-                self.mqtt_connect = MqttConnect(mqtt_creds)
-                await self.mqtt_connect.connect()
+    async def get_mqtt_devices(self) -> List[Dict]:
+        """Get list of MQTT-connected devices."""
+        return await self.eufy_login.get_device_list()
 
-    async def get_mqtt_devices(self) -> List:
-        """Get list of MQTT devices."""
-        return self.mqtt_devices
+    async def get_cloud_devices(self) -> List[Dict]:
+        """Get list of cloud-connected devices."""
+        return await self.eufy_login.get_cloud_device_list()
 
-    async def get_cloud_devices(self) -> List:
-        """Get list of cloud devices."""
-        return self.cloud_devices
+    async def get_device_properties(self, device_model: str) -> None:
+        """Get device properties."""
+        return await self.eufy_login.get_device_properties(device_model)
 
-    async def send_command(self, device_sn: str, command: Dict) -> None:
-        """Send command to device.
+    async def get_mqtt_credentials(self) -> Dict:
+        """Get MQTT credentials."""
+        return await self.eufy_login.get_mqtt_credentials()
 
-        Args:
-            device_sn: Device serial number
-            command: Command data to send
-        """
-        if self.mqtt_connect:
-            await self.mqtt_connect.send_command(device_sn, command)
-        else:
-            _LOGGER.error("MQTT connection not initialized")
+    async def get_user_info(self) -> Dict:
+        """Get user information."""
+        return await self.eufy_login.get_user_info()
 
-    async def get_device_status(self, device_sn: str) -> Optional[Dict]:
-        """Get device status.
+    async def get_cloud_device(self, device_id: str) -> Optional[Dict]:
+        """Get cloud device by ID."""
+        return await self.eufy_login.get_cloud_device(device_id)
 
-        Args:
-            device_sn: Device serial number
-
-        Returns:
-            Device status data or None if not found
-        """
-        if not self.mqtt_connect:
-            return None
-
-        try:
-            status = await self.mqtt_connect.get_device_status(device_sn)
-            if status:
-                return {
-                    "state": status.get("state", "STANDBY"),
-                    "battery_level": status.get("battery", 0),
-                    "status_message": status.get("status_message", ""),
-                    "error_code": status.get("error_code"),
-                }
-        except Exception as err:
-            _LOGGER.error("Failed to get device status: %s", err)
-
-        return None
+    async def send_cloud_command(self, device_id: str, command: Dict) -> None:
+        """Send command to cloud device."""
+        await self.eufy_login.send_cloud_command(device_id, command)
