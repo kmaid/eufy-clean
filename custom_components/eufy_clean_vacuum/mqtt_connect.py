@@ -21,81 +21,59 @@ class MQTTConnect:
     def __init__(self, mqtt_config: Dict[str, Any]) -> None:
         """Initialize MQTT connection."""
         self.mqtt_config = mqtt_config
-        client_id = f"android-{mqtt_config.get('app_name')}-eufy_android_{mqtt_config.get('user_id')}-{int(time.time())}"
-        self.client = mqtt.Client(client_id=client_id)
-        self.client.username_pw_set(username=mqtt_config.get("thing_name"))
+        self.client_id = f"android-{mqtt_config.get('app_name')}-eufy_android_{mqtt_config.get('user_id')}-{int(time.time())}"
+        _LOGGER.debug("Initializing MQTT client with ID: %s", self.client_id)
 
-        # Create temporary files for certificates
-        self.cert_file = None
-        self.key_file = None
+        self.client = mqtt.Client(client_id=self.client_id)
+        self.client.username_pw_set(username=mqtt_config.get("thing_name"))
+        _LOGGER.debug("Using MQTT username: %s", mqtt_config.get("thing_name"))
 
         # Set up callbacks
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.client.on_disconnect = self._on_disconnect
+        self.client.on_log = self._on_log
+        self.client.on_subscribe = self._on_subscribe
+        self.client.on_publish = self._on_publish
 
         self.devices = []
+        self.connected = False
+        self.device_model = None
 
-    async def _setup_certificates(self) -> None:
-        """Set up certificates for TLS connection."""
-        try:
-            # Create temporary files for certificates
-            cert_data = self.mqtt_config.get("certificate_pem", "").encode("utf-8")
-            key_data = self.mqtt_config.get("private_key", "").encode("utf-8")
+    def _on_log(self, client: mqtt.Client, userdata: Any, level: int, buf: str) -> None:
+        """Handle MQTT log messages."""
+        _LOGGER.debug("MQTT Log: %s", buf)
 
-            # Create temporary files in a thread
-            def create_cert_files():
-                cert_fd, cert_file = tempfile.mkstemp()
-                key_fd, key_file = tempfile.mkstemp()
-                os.write(cert_fd, cert_data)
-                os.write(key_fd, key_data)
-                os.close(cert_fd)
-                os.close(key_fd)
-                return cert_file, key_file
+    def _on_subscribe(self, client: mqtt.Client, userdata: Any, mid: int, granted_qos: tuple) -> None:
+        """Handle subscription confirmations."""
+        _LOGGER.debug("MQTT Subscribed with message ID: %s, QoS: %s", mid, granted_qos)
 
-            self.cert_file, self.key_file = await asyncio.get_event_loop().run_in_executor(
-                _EXECUTOR, create_cert_files
-            )
-
-            # Set up TLS in a thread
-            def setup_tls():
-                self.client.tls_set(
-                    certfile=self.cert_file,
-                    keyfile=self.key_file,
-                    cert_reqs=ssl.CERT_REQUIRED,
-                    tls_version=ssl.PROTOCOL_TLS,
-                    ciphers=None,
-                    ca_certs=None  # Use system CA certificates
-                )
-                self.client.tls_insecure_set(True)
-
-            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, setup_tls)
-
-        except Exception as err:
-            await self._cleanup_certificate_files()
-            raise CannotConnect(f"Failed to set up certificates: {err}")
-
-    async def _cleanup_certificate_files(self) -> None:
-        """Clean up temporary certificate files."""
-        try:
-            def cleanup():
-                if self.cert_file and os.path.exists(self.cert_file):
-                    os.unlink(self.cert_file)
-                if self.key_file and os.path.exists(self.key_file):
-                    os.unlink(self.key_file)
-
-            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, cleanup)
-        except Exception as err:
-            _LOGGER.error("Error cleaning up certificate files: %s", err)
+    def _on_publish(self, client: mqtt.Client, userdata: Any, mid: int) -> None:
+        """Handle publish confirmations."""
+        _LOGGER.debug("MQTT Message published with ID: %s", mid)
 
     def _on_connect(self, client: mqtt.Client, userdata: Any, flags: Dict, rc: int) -> None:
         """Handle connection established."""
         if rc == 0:
-            _LOGGER.debug("Connected to MQTT broker")
-            # Subscribe to device status topics
-            client.subscribe("device/+/status")
+            self.connected = True
+            _LOGGER.debug("Connected to MQTT broker with flags: %s", flags)
+
+            # Subscribe to response topic
+            if self.device_model:
+                topic = f"cmd/eufy_home/{self.device_model}/+/res"
+                _LOGGER.debug("Subscribing to topic: %s", topic)
+                client.subscribe(topic)
         else:
+            self.connected = False
             _LOGGER.error("Failed to connect to MQTT broker with result code %s", rc)
+            error_messages = {
+                1: "Connection refused - incorrect protocol version",
+                2: "Connection refused - invalid client identifier",
+                3: "Connection refused - server unavailable",
+                4: "Connection refused - bad username or password",
+                5: "Connection refused - not authorized"
+            }
+            _LOGGER.error("Connection error: %s", error_messages.get(rc, "Unknown error"))
 
     def _on_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
         """Handle incoming MQTT message."""
@@ -103,93 +81,136 @@ class MQTTConnect:
             payload = json.loads(msg.payload.decode())
             _LOGGER.debug("Received message on topic %s: %s", msg.topic, payload)
 
-            if msg.topic == "device/list":
-                self.devices = payload.get("devices", [])
-            elif msg.topic.startswith("device/"):
-                device_id = msg.topic.split("/")[1]
+            if "payload" in payload and "data" in payload["payload"]:
+                data = payload["payload"]["data"]
+                device_id = msg.topic.split("/")[3]  # Extract device ID from topic
+
                 device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
                 if device:
-                    device.update(payload)
+                    device.update({"dps": data})
+                    _LOGGER.debug("Updated device %s with new data", device_id)
                 else:
-                    self.devices.append(payload)
+                    self.devices.append({"device_sn": device_id, "dps": data})
+                    _LOGGER.debug("Added new device %s", device_id)
+        except json.JSONDecodeError as err:
+            _LOGGER.error("Failed to decode MQTT message on topic %s: %s", msg.topic, err)
         except Exception as err:
-            _LOGGER.error("Error handling MQTT message: %s", err)
+            _LOGGER.error("Error handling MQTT message on topic %s: %s", msg.topic, err)
 
     def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
         """Handle disconnection."""
-        _LOGGER.warning("Disconnected from MQTT broker with result code %s", rc)
+        self.connected = False
+        if rc == 0:
+            _LOGGER.info("Cleanly disconnected from MQTT broker")
+        else:
+            _LOGGER.warning("Unexpectedly disconnected from MQTT broker with result code %s", rc)
+            error_messages = {
+                1: "Out of memory",
+                2: "Protocol error",
+                3: "Invalid message",
+                4: "Unknown protocol version",
+                5: "Socket error",
+                6: "Authentication error",
+                7: "ACK timeout",
+                8: "Not connected",
+                9: "Connection lost",
+                10: "Connection refused",
+                11: "Connection reset"
+            }
+            _LOGGER.error("Disconnect reason: %s", error_messages.get(rc, "Unknown error"))
 
-    async def connect(self) -> None:
+    async def connect(self, device_model: str = None) -> None:
         """Connect to MQTT broker."""
         try:
             endpoint = self.mqtt_config.get("endpoint_addr", "mqtt.eufylife.com")
             if not endpoint:
                 raise CannotConnect("No MQTT endpoint available")
 
-            # Set up certificates before connecting
-            await self._setup_certificates()
+            self.device_model = device_model
+            _LOGGER.debug("Connecting to MQTT broker at %s:8883", endpoint)
+
+            # Set up TLS with certificate strings
+            def setup_tls():
+                _LOGGER.debug("Setting up TLS")
+                # Create temporary files for certificates
+                cert_fd, cert_file = tempfile.mkstemp()
+                key_fd, key_file = tempfile.mkstemp()
+
+                try:
+                    # Write certificate data
+                    cert_data = self.mqtt_config.get("certificate_pem", "").encode("utf-8")
+                    key_data = self.mqtt_config.get("private_key", "").encode("utf-8")
+                    os.write(cert_fd, cert_data)
+                    os.write(key_fd, key_data)
+                    os.close(cert_fd)
+                    os.close(key_fd)
+
+                    # Set up TLS with the certificate files
+                    self.client.tls_set(
+                        certfile=cert_file,
+                        keyfile=key_file,
+                        cert_reqs=ssl.CERT_NONE,
+                        tls_version=ssl.PROTOCOL_TLS,
+                        ciphers=None
+                    )
+                    self.client.tls_insecure_set(True)
+                    _LOGGER.debug("TLS setup completed")
+                finally:
+                    # Clean up temporary files
+                    try:
+                        os.unlink(cert_file)
+                        os.unlink(key_file)
+                    except Exception as e:
+                        _LOGGER.warning("Error cleaning up certificate files: %s", e)
+
+            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, setup_tls)
 
             # Connect in a thread
             def do_connect():
+                _LOGGER.debug("Initiating MQTT connection")
                 self.client.connect(
                     endpoint,
                     port=8883,  # Use TLS port
                     keepalive=60
                 )
                 self.client.loop_start()
+                _LOGGER.debug("MQTT loop started")
 
             await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_connect)
             _LOGGER.debug("Successfully connected to MQTT broker")
         except Exception as err:
             _LOGGER.error("Error connecting to MQTT broker: %s", err)
-            await self._cleanup_certificate_files()
             raise CannotConnect(f"Failed to connect to MQTT broker: {err}")
 
     async def disconnect(self) -> None:
         """Disconnect from MQTT broker."""
         try:
             def do_disconnect():
+                _LOGGER.debug("Stopping MQTT loop")
                 self.client.loop_stop()
+                _LOGGER.debug("Disconnecting from MQTT broker")
                 self.client.disconnect()
 
             await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_disconnect)
             _LOGGER.debug("Successfully disconnected from MQTT broker")
         except Exception as err:
             _LOGGER.error("Error disconnecting from MQTT broker: %s", err)
-        finally:
-            await self._cleanup_certificate_files()
 
     async def get_device_list(self) -> List[Dict[str, Any]]:
         """Get list of devices from MQTT."""
-        try:
-            # Subscribe to device list topic
-            def do_subscribe():
-                self.client.subscribe("device/list")
-
-            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_subscribe)
-            return self.devices
-        except Exception as err:
-            _LOGGER.error("Error getting device list from MQTT: %s", err)
-            return []
+        return self.devices
 
     async def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
         """Get device by ID."""
-        try:
-            # Subscribe to device topic
-            def do_subscribe():
-                self.client.subscribe(f"device/{device_id}")
-
-            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_subscribe)
-            device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
-            return device
-        except Exception as err:
-            _LOGGER.error("Error getting device from MQTT: %s", err)
-            return None
+        return next((d for d in self.devices if d.get("device_sn") == device_id), None)
 
     async def send_command(self, device_id: str, dps: Dict[str, Any]) -> None:
         """Send command to device."""
+        if not self.device_model:
+            _LOGGER.error("Device model not set, cannot send command")
+            return
+
         try:
-            # Format command according to original implementation
             payload = {
                 "account_id": self.mqtt_config.get("user_id"),
                 "data": dps,
@@ -214,10 +235,13 @@ class MQTTConnect:
             }
 
             def do_publish():
-                self.client.publish(
-                    f"cmd/eufy_home/{device_id}/req",
+                topic = f"cmd/eufy_home/{self.device_model}/{device_id}/req"
+                _LOGGER.debug("Publishing command to topic: %s", topic)
+                result = self.client.publish(
+                    topic,
                     json.dumps(mqtt_val)
                 )
+                _LOGGER.debug("Command publish result: %s", result.rc)
 
             _LOGGER.debug("Sending command to device %s: %s", device_id, payload)
             await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_publish)
