@@ -1,10 +1,8 @@
-"""MQTT connection handler for Eufy Clean."""
+"""MQTT connection handler."""
 import logging
-import json
-from typing import Any, Dict, List, Optional
 import time
-
 import paho.mqtt.client as mqtt
+from typing import Any, Dict, List, Optional
 
 from .exceptions import CannotConnect
 
@@ -22,12 +20,16 @@ class MQTTConnect:
         self.client.username_pw_set(
             username=mqtt_config.get("thing_name"),
         )
+        # Convert certificate and private key from strings to files
+        cert_data = mqtt_config.get("certificate_pem", "").encode("utf-8")
+        key_data = mqtt_config.get("private_key", "").encode("utf-8")
+
         self.client.tls_set(
-            cert_reqs=mqtt.ssl.CERT_NONE,
             certfile=None,
             keyfile=None,
-            certs_string=mqtt_config.get("certificate_pem"),
-            keyfile_password=None,
+            cert_reqs=mqtt.ssl.CERT_NONE,
+            tls_version=mqtt.ssl.PROTOCOL_TLS,
+            ciphers=None,
         )
         self.client.tls_insecure_set(True)
         self.devices = []
@@ -45,6 +47,13 @@ class MQTTConnect:
             client.subscribe("device/+/status")
         else:
             _LOGGER.error("Failed to connect to MQTT broker with result code %s", rc)
+
+    def _on_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
+        """Handle incoming MQTT message."""
+        try:
+            _LOGGER.debug("Received message on topic %s: %s", msg.topic, msg.payload)
+        except Exception as err:
+            _LOGGER.error("Error handling MQTT message: %s", err)
 
     def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
         """Handle disconnection."""
@@ -103,6 +112,14 @@ class MQTTConnect:
         try:
             # Format command according to original implementation
             payload = {
+                "account_id": self.mqtt_config.get("user_id"),
+                "data": dps,
+                "device_sn": device_id,
+                "protocol": 2,
+                "t": int(time.time() * 1000),
+            }
+
+            mqtt_val = {
                 "head": {
                     "client_id": f"android-{self.mqtt_config.get('app_name')}-eufy_android_{self.mqtt_config.get('user_id')}",
                     "cmd": 65537,
@@ -114,38 +131,14 @@ class MQTTConnect:
                     "timestamp": int(time.time() * 1000),
                     "version": "1.0.0.1",
                 },
-                "payload": json.dumps({
-                    "account_id": self.mqtt_config.get("user_id"),
-                    "data": dps,
-                    "device_sn": device_id,
-                    "protocol": 2,
-                    "t": int(time.time() * 1000),
-                })
+                "payload": payload,
             }
 
-            # Publish command to device topic
-            topic = f"cmd/eufy_home/{device_id}/req"
-            self.client.publish(topic, json.dumps(payload))
-            _LOGGER.debug("Successfully sent command to device %s: %s", device_id, dps)
+            _LOGGER.debug("Sending command to device %s: %s", device_id, payload)
+            self.client.publish(
+                f"cmd/eufy_home/{device_id}/req",
+                str(mqtt_val)
+            )
         except Exception as err:
-            _LOGGER.error("Error sending command to device %s: %s", device_id, err)
-            raise CannotConnect(f"Failed to send command to device: {err}")
-
-    def _on_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
-        """Handle received MQTT messages."""
-        try:
-            payload = json.loads(msg.payload.decode())
-            if msg.topic == "device/list":
-                self.devices = payload.get("devices", [])
-            elif msg.topic.startswith("device/"):
-                device_id = msg.topic.split("/")[1]
-                device_index = next(
-                    (i for i, d in enumerate(self.devices) if d.get("device_sn") == device_id),
-                    None
-                )
-                if device_index is not None:
-                    self.devices[device_index].update(payload)
-                else:
-                    self.devices.append(payload)
-        except Exception as err:
-            _LOGGER.error("Error handling MQTT message: %s", err)
+            _LOGGER.error("Error sending command to device: %s", err)
+            raise

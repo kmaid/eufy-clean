@@ -22,9 +22,13 @@ PLATFORMS: list[Platform] = [Platform.VACUUM]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Eufy Clean Vacuum from a config entry."""
+    # Get the Home Assistant locale
+    locale = hass.config.language or "en"
+
     api = EufyCleanApi(
         entry.data[CONF_USERNAME],
         entry.data[CONF_PASSWORD],
+        locale=locale,
     )
 
     try:

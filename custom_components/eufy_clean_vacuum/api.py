@@ -1,33 +1,29 @@
 """Eufy Clean API client."""
 import logging
-import secrets
+import uuid
 from typing import Any, Dict, List, Optional
 
 from .login import EufyLogin
-from .exceptions import InvalidAuth, CannotConnect
 
 _LOGGER = logging.getLogger(__name__)
 
 class EufyCleanApi:
     """Eufy Clean API client."""
 
-    def __init__(self, username: str, password: str) -> None:
+    def __init__(self, username: str, password: str, locale: str = "en") -> None:
         """Initialize the API client."""
         self.username = username
         self.password = password
-        self.openudid = secrets.token_hex(16)  # Generate a random openudid
-        self.login = EufyLogin(username, password, self.openudid)
+        self.locale = locale
+        openudid = str(uuid.uuid4())
+        self.login = EufyLogin(username, password, openudid, locale)
         self.mqtt_credentials = None
-        self.cloud_devices = []
-        self.mqtt_devices = []
 
     async def init(self) -> None:
         """Initialize the API connection."""
         try:
             await self.login.init()
             self.mqtt_credentials = self.login.mqtt_credentials
-            self.cloud_devices = self.login.cloud_devices
-            self.mqtt_devices = self.login.mqtt_devices
             _LOGGER.debug("Successfully initialized API connection")
         except Exception as err:
             _LOGGER.error("Failed to initialize API connection: %s", err)
@@ -36,15 +32,15 @@ class EufyCleanApi:
 
     async def get_cloud_devices(self) -> List[Dict[str, Any]]:
         """Get cloud devices."""
-        return self.cloud_devices
+        return self.login.cloud_devices
 
     async def get_mqtt_devices(self) -> List[Dict[str, Any]]:
         """Get MQTT devices."""
-        return self.mqtt_devices
+        return self.login.mqtt_devices
 
     async def get_all_devices(self) -> List[Dict[str, Any]]:
         """Get all devices."""
-        return [*self.cloud_devices, *self.mqtt_devices]
+        return [*self.login.cloud_devices, *self.login.mqtt_devices]
 
     async def get_device_status(self, device_id: str) -> Dict[str, Any]:
         """Get device status."""
@@ -60,7 +56,7 @@ class EufyCleanApi:
 
             # Fall back to cloud
             cloud_device = next(
-                (d for d in self.cloud_devices if d.get("id") == device_id), None
+                (d for d in self.login.cloud_devices if d.get("id") == device_id), None
             )
             if cloud_device:
                 return {

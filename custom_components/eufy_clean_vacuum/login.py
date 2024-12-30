@@ -14,11 +14,12 @@ _LOGGER = logging.getLogger(__name__)
 class EufyLogin:
     """Eufy Clean login controller."""
 
-    def __init__(self, username: str, password: str, openudid: str) -> None:
+    def __init__(self, username: str, password: str, openudid: str, locale: str = "en") -> None:
         """Initialize the login controller."""
         self.username = username
         self.password = password
         self.openudid = openudid
+        self.locale = locale
         self.session = aiohttp.ClientSession()
         self.user_info = None
         self.cloud_devices = []
@@ -47,13 +48,13 @@ class EufyLogin:
             "category": "Home",
             "Accept": "*/*",
             "openudid": self.openudid,
-            "Accept-Language": "nl-NL;q=1, uk-DE;q=0.9, en-NL;q=0.8",
+            "Accept-Language": f"{self.locale};q=1",
             "Content-Type": "application/json",
             "clientType": "1",
-            "language": "nl",
+            "language": self.locale.split("-")[0],
             "User-Agent": "EufyHome-iOS-2.14.0-6",
             "timezone": "Europe/Berlin",
-            "country": "NL",
+            "country": self.locale.split("-")[1] if "-" in self.locale else "US",
             "Connection": "keep-alive",
         }
         payload = {
@@ -96,8 +97,8 @@ class EufyLogin:
             "token": self.user_info["access_token"],
             "openudid": self.openudid,
             "clienttype": "2",
-            "language": "de",
-            "country": "DE",
+            "language": self.locale.split("-")[0],
+            "country": self.locale.split("-")[1] if "-" in self.locale else "US",
         }
 
         try:
@@ -133,8 +134,8 @@ class EufyLogin:
             "token": self.user_info["access_token"],
             "openudid": self.openudid,
             "clienttype": "2",
-            "language": "nl",
-            "country": "NL",
+            "language": self.locale.split("-")[0],
+            "country": self.locale.split("-")[1] if "-" in self.locale else "US",
         }
 
         try:
@@ -160,8 +161,8 @@ class EufyLogin:
             "user-agent": "EufyHome-Android-3.1.3-753",
             "timezone": "Europe/Berlin",
             "openudid": self.openudid,
-            "language": "de",
-            "country": "DE",
+            "language": self.locale.split("-")[0],
+            "country": self.locale.split("-")[1] if "-" in self.locale else "US",
             "os-version": "Android",
             "model-type": "PHONE",
             "app-name": "eufy_home",
