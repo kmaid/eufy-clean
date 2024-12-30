@@ -1,8 +1,10 @@
-"""Base controller for Eufy Clean devices."""
+"""Base controller for Eufy Clean."""
+import logging
 from typing import Dict, Optional, Union, Any
-from ..constants.devices import EUFY_CLEAN_X_SERIES
-from ..constants.state import WorkMode, Control
-from ...lib.utils import decode, encode, get_multi_data, get_proto_file
+
+from custom_components.eufy_clean_vacuum.eufy_clean.constants.devices import EUFY_CLEAN_X_SERIES
+from custom_components.eufy_clean_vacuum.eufy_clean.constants.state import WorkMode, Control, EUFY_CLEAN_NOVEL_CLEAN_SPEED
+from custom_components.eufy_clean_vacuum.eufy_clean.lib.utils import decode, encode, get_multi_data, get_proto_file
 
 class Base:
     def __init__(self, config: Dict[str, Any]):
@@ -26,7 +28,6 @@ class Base:
     async def get_clean_speed(self) -> str:
         """Get current clean speed."""
         if isinstance(self.robovac_data.get('CLEAN_SPEED'), (int, str)) or len(self.robovac_data.get('CLEAN_SPEED', [])) == 1:
-            from ...eufy_clean.constants.state import EUFY_CLEAN_NOVEL_CLEAN_SPEED
             clean_speeds = [str(speed) for speed in EUFY_CLEAN_NOVEL_CLEAN_SPEED]
             return clean_speeds[int(self.robovac_data['CLEAN_SPEED'])].lower()
 
@@ -83,7 +84,6 @@ class Base:
         """
         try:
             if self.novel_api:
-                from ...eufy_clean.constants.state import EUFY_CLEAN_NOVEL_CLEAN_SPEED
                 clean_speeds = [str(speed) for speed in EUFY_CLEAN_NOVEL_CLEAN_SPEED]
                 set_clean_speed = clean_speeds.index(clean_speed)
                 print('Setting clean speed to: ', set_clean_speed, clean_speeds, clean_speed)
