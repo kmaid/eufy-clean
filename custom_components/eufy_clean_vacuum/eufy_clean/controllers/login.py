@@ -1,6 +1,7 @@
 """Login controller for Eufy Clean."""
 import logging
 import aiohttp
+import async_timeout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -12,9 +13,16 @@ class EufyLogin:
         self.username = username
         self.password = password
         self.openudid = openudid
-        self.session = aiohttp.ClientSession()
+        self._session = None
         self.access_token = None
         self.user_id = None
+
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        """Get the current session or create a new one."""
+        if self._session is None:
+            self._session = aiohttp.ClientSession()
+        return self._session
 
     async def init(self) -> None:
         """Initialize connection and authenticate."""
@@ -45,26 +53,28 @@ class EufyLogin:
                 "client_secret": "GQCpr9dSp3uQpsOMgJ4xQ"
             }
 
-            async with self.session.post(url, json=payload, headers=headers) as response:
-                if response.status != 200:
-                    _LOGGER.error("Authentication failed: %s", await response.text())
-                    raise Exception("Failed to authenticate with Eufy")
+            async with async_timeout.timeout(10):
+                async with self.session.post(url, json=payload, headers=headers) as response:
+                    if response.status != 200:
+                        _LOGGER.error("Authentication failed: %s", await response.text())
+                        raise Exception("Failed to authenticate with Eufy")
 
-                data = await response.json()
+                    data = await response.json()
 
-                if data.get("access_token"):
-                    self.access_token = data["access_token"]
-                    _LOGGER.debug("Successfully authenticated with Eufy")
-                else:
-                    _LOGGER.error("Login failed: %s", data)
-                    raise Exception("No access token received")
+                    if data.get("access_token"):
+                        self.access_token = data["access_token"]
+                        _LOGGER.debug("Successfully authenticated with Eufy")
+                    else:
+                        _LOGGER.error("Login failed: %s", data)
+                        raise Exception("No access token received")
 
         except Exception as e:
             _LOGGER.error("Error during authentication: %s", str(e))
-            await self.close()  # Ensure we close the session on error
+            await self.close()
             raise
 
     async def close(self) -> None:
         """Close the session."""
-        if not self.session.closed:
-            await self.session.close()
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None

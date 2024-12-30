@@ -16,11 +16,23 @@ class EufyClean:
             openudid = str(uuid.uuid4())
 
         self.login = EufyLogin(username, password, openudid)
+        self._available = False
+
+    @property
+    def available(self) -> bool:
+        """Return if the API is available."""
+        return self._available
 
     async def init(self) -> None:
         """Initialize connection and authenticate."""
-        await self.login.init()
+        try:
+            await self.login.init()
+            self._available = True
+        except Exception as err:
+            self._available = False
+            raise
 
     async def close(self) -> None:
         """Close all connections."""
+        self._available = False
         await self.login.close()

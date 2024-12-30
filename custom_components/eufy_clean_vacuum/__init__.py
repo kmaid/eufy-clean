@@ -14,21 +14,24 @@ DOMAIN = "eufy_clean_vacuum"
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Eufy Clean Vacuum from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
+
     try:
         api = EufyClean(
             username=entry.data[CONF_USERNAME],
             password=entry.data[CONF_PASSWORD],
         )
         await api.init()
+        hass.data[DOMAIN][entry.entry_id] = api
     except Exception as err:
         _LOGGER.error("Failed to connect to Eufy Clean API: %s", err)
         raise ConfigEntryNotReady from err
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    api = hass.data[DOMAIN].pop(entry.entry_id)
-    await api.close()
+    if entry.entry_id in hass.data[DOMAIN]:
+        api = hass.data[DOMAIN].pop(entry.entry_id)
+        await api.close()
     return True
