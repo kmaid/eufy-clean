@@ -60,9 +60,22 @@ class MQTTConnect:
 
             # Subscribe to response topic
             if self.device_model:
-                topic = f"cmd/eufy_home/{self.device_model}/+/res"
-                _LOGGER.debug("Subscribing to topic: %s", topic)
-                client.subscribe(topic)
+                # Subscribe to both response and state topics for the specific model
+                topics = [
+                    (f"cmd/eufy_home/{self.device_model}/+/res", 0),
+                    (f"state/eufy_home/{self.device_model}/+", 0),
+                    (f"smart/mb/in/+", 0)  # Additional topic from TypeScript code
+                ]
+                _LOGGER.debug("Subscribing to topics: %s", topics)
+                client.subscribe(topics)
+            else:
+                _LOGGER.warning("No device model available, subscribing to all topics")
+                topics = [
+                    ("cmd/eufy_home/+/+/res", 0),
+                    ("state/eufy_home/+/+", 0),
+                    ("smart/mb/in/+", 0)
+                ]
+                client.subscribe(topics)
         else:
             self.connected = False
             _LOGGER.error("Failed to connect to MQTT broker with result code %s", rc)
@@ -78,24 +91,77 @@ class MQTTConnect:
     def _on_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
         """Handle incoming MQTT message."""
         try:
+            _LOGGER.info("Received MQTT message - Topic: %s", msg.topic)
+            _LOGGER.debug("Raw payload: %s", msg.payload.decode())
             payload = json.loads(msg.payload.decode())
-            _LOGGER.debug("Received message on topic %s: %s", msg.topic, payload)
+            _LOGGER.info("Decoded payload: %s", payload)
 
-            if "payload" in payload and "data" in payload["payload"]:
-                data = payload["payload"]["data"]
-                device_id = msg.topic.split("/")[3]  # Extract device ID from topic
+            # Extract device ID from topic
+            topic_parts = msg.topic.split("/")
+            device_id = None
+
+            if "smart/mb/in" in msg.topic:
+                device_id = topic_parts[-1]
+                _LOGGER.info("Smart topic message for device: %s", device_id)
+            elif len(topic_parts) >= 4:
+                device_id = topic_parts[3]
+                _LOGGER.info("Standard topic message for device: %s", device_id)
+
+            if device_id:
+                _LOGGER.info("Processing message for device ID: %s", device_id)
+
+                # Handle both state and command response messages
+                if "state" in topic_parts[0]:
+                    _LOGGER.info("Processing state message")
+                    data = payload
+                elif "payload" in payload and "data" in payload["payload"]:
+                    _LOGGER.info("Processing command response message")
+                    data = payload["payload"]["data"]
+                else:
+                    _LOGGER.warning("Unexpected message format: %s", payload)
+                    return
+
+                # Extract DPS data
+                dps = data.get("dps", {})
+                _LOGGER.info(
+                    "DPS data for device %s:\n"
+                    "- Raw DPS: %s\n"
+                    "- Legacy Work Status (15): %s\n"
+                    "- Novel Work Status (153): %s\n"
+                    "- Legacy Battery (104): %s\n"
+                    "- Novel Battery (163): %s",
+                    device_id,
+                    dps,
+                    dps.get("15"),
+                    dps.get("153"),
+                    dps.get("104"),
+                    dps.get("163")
+                )
 
                 device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
                 if device:
-                    device.update({"dps": data})
-                    _LOGGER.debug("Updated device %s with new data", device_id)
+                    _LOGGER.info("Updating existing device %s with new data", device_id)
+                    old_dps = device.get("dps", {})
+                    _LOGGER.info("Old DPS data: %s", old_dps)
+                    _LOGGER.info("New DPS data: %s", dps)
+                    device.update({
+                        "dps": dps,
+                        "last_update": int(time.time() * 1000)
+                    })
                 else:
-                    self.devices.append({"device_sn": device_id, "dps": data})
-                    _LOGGER.debug("Added new device %s", device_id)
+                    _LOGGER.info("Adding new device from MQTT: %s with DPS: %s", device_id, dps)
+                    self.devices.append({
+                        "device_sn": device_id,
+                        "dps": dps,
+                        "mqtt": True,
+                        "last_update": int(time.time() * 1000)
+                    })
+            else:
+                _LOGGER.warning("Could not extract device ID from topic: %s", msg.topic)
         except json.JSONDecodeError as err:
-            _LOGGER.error("Failed to decode MQTT message on topic %s: %s", msg.topic, err)
+            _LOGGER.error("Failed to decode MQTT message on topic %s: %s\nPayload: %s", msg.topic, err, msg.payload.decode())
         except Exception as err:
-            _LOGGER.error("Error handling MQTT message on topic %s: %s", msg.topic, err)
+            _LOGGER.error("Error handling MQTT message on topic %s: %s\nPayload: %s", msg.topic, err, msg.payload.decode())
 
     def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
         """Handle disconnection."""

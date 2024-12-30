@@ -4,6 +4,7 @@ import json
 import hashlib
 import aiohttp
 import async_timeout
+import time
 from typing import Any, Dict, List, Optional
 
 from .mqtt_connect import MQTTConnect
@@ -116,6 +117,7 @@ class EufyLogin:
 
                     self.user_info.update(data)
                     _LOGGER.debug("Successfully got user info")
+                    _LOGGER.info("User info retrieved - ID: %s, Email: %s", data.get("user_center_id"), self.username)
         except Exception as err:
             _LOGGER.error("Error getting user info: %s", err)
             raise
@@ -142,10 +144,47 @@ class EufyLogin:
             async with async_timeout.timeout(10):
                 async with self.session.get(url, headers=headers) as response:
                     data = await response.json()
+                    _LOGGER.debug("Raw cloud API response: %s", data)
+
                     if data.get("data"):
                         data = data["data"]
                     self.cloud_devices = data.get("devices", [])
                     _LOGGER.debug("Successfully got cloud devices")
+
+                    # Log detailed cloud device information
+                    _LOGGER.info("Found %d cloud devices:", len(self.cloud_devices))
+                    transformed_devices = []
+                    for device in self.cloud_devices:
+                        device_sn = device.get("id")  # This is the device serial number
+                        device_name = device.get("name") or device.get("alias_name", "Unknown")
+                        device_model = device.get("product", {}).get("name", "Unknown")
+                        product_code = device.get("product", {}).get("product_code", "Unknown")
+
+                        _LOGGER.info(
+                            "Cloud Device - SN: %s, Name: %s, Model: %s, Product Code: %s",
+                            device_sn,
+                            device_name,
+                            device_model,
+                            product_code
+                        )
+                        _LOGGER.debug("Full cloud device data: %s", device)
+
+                        # Transform cloud device data to match expected format
+                        transformed_device = {
+                            "device_sn": device_sn,  # Use device_sn consistently
+                            "deviceName": device_name,
+                            "deviceModel": device_model,
+                            "product_code": product_code,
+                            "online": not device.get("is_not_work", True),
+                            "dps": device.get("dps", {}),
+                            "mqtt": False,  # Mark as cloud device
+                            "raw_data": device  # Keep original data
+                        }
+                        transformed_devices.append(transformed_device)
+
+                    # Replace original devices with transformed ones
+                    self.cloud_devices = transformed_devices
+                    _LOGGER.debug("Transformed cloud devices: %s", self.cloud_devices)
         except Exception as err:
             _LOGGER.error("Error getting cloud devices: %s", err)
             raise
@@ -177,6 +216,11 @@ class EufyLogin:
                     if data.get("data"):
                         self.mqtt_credentials = data["data"]
                         _LOGGER.debug("Successfully got MQTT credentials")
+                        _LOGGER.info(
+                            "MQTT credentials retrieved - Endpoint: %s, Thing Name: %s",
+                            self.mqtt_credentials.get("endpoint_addr", "Unknown"),
+                            self.mqtt_credentials.get("thing_name", "Unknown")
+                        )
                     else:
                         raise CannotConnect("Failed to get MQTT credentials")
         except Exception as err:
@@ -190,9 +234,59 @@ class EufyLogin:
 
         try:
             self.mqtt_connect = MQTTConnect(self.mqtt_credentials)
-            await self.mqtt_connect.connect()
+            _LOGGER.debug("Created MQTT connect instance")
+
+            # Get the device model from the cloud device if available
+            device_model = None
+            if self.cloud_devices:
+                # Get the first cloud device's product code
+                cloud_device = self.cloud_devices[0]
+                device_model = cloud_device.get("product_code")
+                _LOGGER.debug("Using device model from cloud device: %s", device_model)
+
+            await self.mqtt_connect.connect(device_model=device_model)
+            _LOGGER.debug("MQTT connect successful, getting device list")
+
             self.mqtt_devices = await self.mqtt_connect.get_device_list()
             _LOGGER.debug("Successfully connected to MQTT")
+
+            # Log detailed MQTT device information
+            _LOGGER.info("Found %d MQTT devices:", len(self.mqtt_devices))
+
+            # If no MQTT devices found but we have cloud devices, create MQTT devices from cloud data
+            if not self.mqtt_devices and self.cloud_devices:
+                _LOGGER.info("No MQTT devices found, creating from cloud devices")
+                for cloud_device in self.cloud_devices:
+                    device_sn = cloud_device.get("device_sn")
+                    if device_sn:
+                        _LOGGER.info("Creating MQTT device from cloud data for device: %s", device_sn)
+                        mqtt_device = {
+                            "device_sn": device_sn,
+                            "deviceName": cloud_device.get("deviceName", "Unknown"),
+                            "deviceModel": cloud_device.get("deviceModel", "Unknown"),
+                            "product_code": cloud_device.get("product_code"),
+                            "dps": cloud_device.get("dps", {}),
+                            "mqtt": True,
+                            "last_update": int(time.time() * 1000)
+                        }
+                        self.mqtt_devices.append(mqtt_device)
+                        _LOGGER.info(
+                            "Created MQTT device - SN: %s, Name: %s, Model: %s",
+                            device_sn,
+                            mqtt_device["deviceName"],
+                            mqtt_device["deviceModel"]
+                        )
+
+            # Log all MQTT devices
+            for device in self.mqtt_devices:
+                _LOGGER.info(
+                    "MQTT Device - SN: %s, Name: %s, Model: %s, Product Code: %s",
+                    device.get("device_sn", "Unknown"),
+                    device.get("deviceName", "Unknown"),
+                    device.get("deviceModel", "Unknown"),
+                    device.get("product_code", "Unknown")
+                )
+                _LOGGER.debug("Full MQTT device data: %s", device)
         except Exception as err:
             _LOGGER.error("Error connecting to MQTT: %s", err)
             raise
