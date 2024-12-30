@@ -1,5 +1,8 @@
-"""Support for Eufy Clean vacuum cleaners."""
+"""Support for Eufy Clean vacuums."""
+from __future__ import annotations
+
 import logging
+from typing import Any
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
@@ -8,18 +11,98 @@ from homeassistant.components.vacuum import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .api import EufyCleanApi
+from .coordinator import EufyCleanDataUpdateCoordinator
+from .shared_connect import SharedConnect
 
 _LOGGER = logging.getLogger(__name__)
 
+SUPPORT_EUFY_CLEAN = (
+    VacuumEntityFeature.BATTERY |
+    VacuumEntityFeature.PAUSE |
+    VacuumEntityFeature.RETURN_HOME |
+    VacuumEntityFeature.START |
+    VacuumEntityFeature.STATE |
+    VacuumEntityFeature.STOP
+)
+
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Eufy Clean vacuum platform."""
-    api = hass.data[DOMAIN][config_entry.entry_id]
-    # For now, just log that we're setting up the vacuum
-    _LOGGER.debug("Setting up Eufy Clean vacuum platform")
-    # We'll add actual vacuum entities later
+    """Set up Eufy Clean vacuum from a config entry."""
+    api: EufyCleanApi = hass.data["eufy_clean_vacuum"][entry.entry_id]
+    coordinator = EufyCleanDataUpdateCoordinator(hass, api)
+    await coordinator.async_config_entry_first_refresh()
+
+    devices = await api.get_all_devices()
+    entities = []
+
+    for device in devices:
+        config = {
+            "device_id": device["deviceId"],
+            "device_model": device["deviceModel"],
+            "debug": False,
+        }
+        shared_connect = SharedConnect(config)
+        entities.append(
+            EufyCleanVacuum(
+                coordinator,
+                device["deviceId"],
+                device["deviceName"],
+                shared_connect,
+            )
+        )
+
+    async_add_entities(entities)
+
+class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVacuumEntity):
+    """Eufy Clean Vacuum."""
+
+    def __init__(
+        self,
+        coordinator: EufyCleanDataUpdateCoordinator,
+        device_id: str,
+        name: str,
+        shared_connect: SharedConnect,
+    ) -> None:
+        """Initialize the vacuum."""
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_name = name
+        self._shared_connect = shared_connect
+        self._attr_supported_features = SUPPORT_EUFY_CLEAN
+        self._attr_unique_id = f"eufy_clean_{device_id}"
+
+    @property
+    def battery_level(self) -> int | None:
+        """Return the battery level of the vacuum cleaner."""
+        return self.coordinator.data.get("devices", {}).get(self._device_id, {}).get("battery_level")
+
+    @property
+    def state(self) -> str | None:
+        """Return the state of the vacuum cleaner."""
+        return self.coordinator.data.get("devices", {}).get(self._device_id, {}).get("state", "unknown")
+
+    async def async_start(self) -> None:
+        """Start or resume the cleaning task."""
+        await self._shared_connect.play()
+        await self.coordinator.async_request_refresh()
+
+    async def async_pause(self) -> None:
+        """Pause the cleaning task."""
+        await self._shared_connect.pause()
+        await self.coordinator.async_request_refresh()
+
+    async def async_stop(self, **kwargs: Any) -> None:
+        """Stop the cleaning task."""
+        await self._shared_connect.stop()
+        await self.coordinator.async_request_refresh()
+
+    async def async_return_to_base(self, **kwargs: Any) -> None:
+        """Set the vacuum cleaner to return to the dock."""
+        await self._shared_connect.go_home()
+        await self.coordinator.async_request_refresh()

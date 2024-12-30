@@ -1,8 +1,10 @@
 """Eufy Clean API client."""
 import logging
+import secrets
 from typing import Any, Dict, List, Optional
 
 from .login import EufyLogin
+from .exceptions import InvalidAuth, CannotConnect
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -13,14 +15,19 @@ class EufyCleanApi:
         """Initialize the API client."""
         self.username = username
         self.password = password
-        self.login = EufyLogin(username, password)
+        self.openudid = secrets.token_hex(16)  # Generate a random openudid
+        self.login = EufyLogin(username, password, self.openudid)
         self.mqtt_credentials = None
+        self.cloud_devices = []
+        self.mqtt_devices = []
 
     async def init(self) -> None:
         """Initialize the API connection."""
         try:
             await self.login.init()
             self.mqtt_credentials = self.login.mqtt_credentials
+            self.cloud_devices = self.login.cloud_devices
+            self.mqtt_devices = self.login.mqtt_devices
             _LOGGER.debug("Successfully initialized API connection")
         except Exception as err:
             _LOGGER.error("Failed to initialize API connection: %s", err)
@@ -29,15 +36,15 @@ class EufyCleanApi:
 
     async def get_cloud_devices(self) -> List[Dict[str, Any]]:
         """Get cloud devices."""
-        return self.login.cloud_devices
+        return self.cloud_devices
 
     async def get_mqtt_devices(self) -> List[Dict[str, Any]]:
         """Get MQTT devices."""
-        return self.login.mqtt_devices
+        return self.mqtt_devices
 
     async def get_all_devices(self) -> List[Dict[str, Any]]:
         """Get all devices."""
-        return [*self.login.cloud_devices, *self.login.mqtt_devices]
+        return [*self.cloud_devices, *self.mqtt_devices]
 
     async def get_device_status(self, device_id: str) -> Dict[str, Any]:
         """Get device status."""
@@ -53,7 +60,7 @@ class EufyCleanApi:
 
             # Fall back to cloud
             cloud_device = next(
-                (d for d in self.login.cloud_devices if d.get("id") == device_id), None
+                (d for d in self.cloud_devices if d.get("id") == device_id), None
             )
             if cloud_device:
                 return {

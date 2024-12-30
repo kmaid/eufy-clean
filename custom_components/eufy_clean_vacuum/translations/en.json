@@ -2,21 +2,21 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Eufy Clean",
-        "description": "Please enter your Eufy Clean credentials",
         "data": {
           "username": "Email",
           "password": "Password"
-        }
+        },
+        "description": "Enter your Eufy Clean credentials.",
+        "title": "Eufy Clean"
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to Eufy Clean. Please check your internet connection and try again.",
-      "invalid_auth": "Invalid email or password. Please check your credentials and try again.",
-      "unknown": "An unexpected error occurred. Please check the logs for more details."
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid authentication",
+      "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "This Eufy Clean account is already configured."
+      "already_configured": "Device is already configured"
     }
   }
 }

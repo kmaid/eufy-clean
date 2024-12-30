@@ -1,54 +1,48 @@
 """The Eufy Clean Vacuum integration."""
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, Platform
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
 
-from .eufy_clean import EufyClean
+from .api import EufyCleanApi
+from .base import Base
+from .shared_connect import SharedConnect
+from .constants import (
+    EUFY_CLEAN_WORK_MODE,
+    EUFY_CLEAN_NOVEL_CLEAN_SPEED,
+    EUFY_CLEAN_CONTROL,
+    EUFY_CLEAN_X_SERIES,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = "eufy_clean_vacuum"
-PLATFORMS = [Platform.VACUUM]
-
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the Eufy Clean Vacuum component."""
-    hass.data.setdefault(DOMAIN, {})
-    return True
+PLATFORMS: list[Platform] = [Platform.VACUUM]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Eufy Clean Vacuum from a config entry."""
+    api = EufyCleanApi(
+        entry.data[CONF_USERNAME],
+        entry.data[CONF_PASSWORD],
+    )
+
     try:
-        # Create API instance
-        api = EufyClean(
-            username=entry.data[CONF_USERNAME],
-            password=entry.data[CONF_PASSWORD],
-        )
-
-        # Test the API connection
         await api.init()
-
-        # Store API instance
-        hass.data[DOMAIN][entry.entry_id] = api
-
-        # Set up platforms
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-        return True
-
     except Exception as err:
-        _LOGGER.error("Failed to connect to Eufy Clean API: %s", err)
-        # Don't raise ConfigEntryNotReady here, as it might prevent reloading
+        _LOGGER.error("Error setting up Eufy Clean integration: %s", err)
         return False
+
+    hass.data.setdefault("eufy_clean_vacuum", {})[entry.entry_id] = api
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    # Unload platforms
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
-    if unload_ok and entry.entry_id in hass.data[DOMAIN]:
-        api = hass.data[DOMAIN].pop(entry.entry_id)
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        api = hass.data["eufy_clean_vacuum"].pop(entry.entry_id)
         await api.close()
 
     return unload_ok

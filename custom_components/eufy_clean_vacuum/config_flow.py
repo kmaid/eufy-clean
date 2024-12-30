@@ -1,21 +1,19 @@
 """Config flow for Eufy Clean Vacuum integration."""
-from __future__ import annotations
-
 import logging
-from typing import Any
+from typing import Any, Dict, Optional
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+import homeassistant.helpers.config_validation as cv
 
-from .eufy_clean import EufyClean
-from .exceptions import InvalidAuth, CannotConnect
+from .api import EufyCleanApi
+from .exceptions import CannotConnect, InvalidAuth
 
 _LOGGER = logging.getLogger(__name__)
-
-DOMAIN = "eufy_clean_vacuum"
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -24,40 +22,42 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> Dict[str, Any]:
+    """Validate the user input allows us to connect."""
+    api = EufyCleanApi(data[CONF_USERNAME], data[CONF_PASSWORD])
+
+    try:
+        await api.init()
+    finally:
+        await api.close()
+
+    # Return info to be stored in the config entry
+    return {"title": f"Eufy Clean ({data[CONF_USERNAME]})"}
+
+class ConfigFlow(config_entries.ConfigFlow, domain="eufy_clean_vacuum"):
     """Handle a config flow for Eufy Clean Vacuum."""
 
     VERSION = 1
 
     async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: Optional[Dict[str, Any]] = None
     ) -> FlowResult:
         """Handle the initial step."""
-        errors: dict[str, str] = {}
+        errors: Dict[str, str] = {}
 
         if user_input is not None:
             try:
-                api = EufyClean(
-                    username=user_input[CONF_USERNAME],
-                    password=user_input[CONF_PASSWORD],
-                )
-                await api.init()
-                await api.close()  # Close the connection after successful test
-
-                return self.async_create_entry(
-                    title=user_input[CONF_USERNAME],
-                    data=user_input,
-                )
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
+                info = await validate_input(self.hass, user_input)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
-            except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected error occurred: %s", err)
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
+            else:
+                return self.async_create_entry(title=info["title"], data=user_input)
 
         return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
-            errors=errors,
+            step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
         )
