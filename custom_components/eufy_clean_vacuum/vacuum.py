@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Dict
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
@@ -85,20 +85,29 @@ async def async_setup_entry(
     devices = await api.get_all_devices()
     _LOGGER.info("Found %d devices during setup", len(devices))
 
+    # Track devices we've already added to avoid duplicates
+    added_devices = set()
     entities = []
 
+    # First add MQTT devices
     for device in devices:
-        # Handle both MQTT and cloud devices
-        device_id = device.get("device_sn")
-        device_model = device.get("deviceModel", "")
-        device_name = device.get("deviceName", "")
+        if device.get("type") != "mqtt":
+            continue
 
+        device_id = device.get("device_sn")
         if not device_id:
             _LOGGER.warning("Device without ID found during setup: %s", device)
             continue
 
+        if device_id in added_devices:
+            _LOGGER.debug("Device %s already added, skipping duplicate", device_id)
+            continue
+
+        device_model = device.get("deviceModel", "")
+        device_name = device.get("deviceName", "")
+
         _LOGGER.info(
-            "Setting up vacuum entity - ID: %s, Name: %s, Model: %s",
+            "Setting up MQTT vacuum entity - ID: %s, Name: %s, Model: %s",
             device_id,
             device_name or "Unknown",
             device_model or "Unknown"
@@ -111,7 +120,7 @@ async def async_setup_entry(
         }
         shared_connect = SharedConnect(config)
 
-        # Set up MQTT connection if available
+        # Set up MQTT connection
         if api.login.mqtt_connect:
             _LOGGER.info("Setting up MQTT connection for device %s", device_id)
             await shared_connect.set_mqtt_connect(api.login.mqtt_connect)
@@ -126,8 +135,50 @@ async def async_setup_entry(
                 shared_connect,
             )
         )
+        added_devices.add(device_id)
 
-    _LOGGER.info("Adding %d vacuum entities to Home Assistant", len(entities))
+    # Then add cloud devices that aren't already added via MQTT
+    for device in devices:
+        if device.get("type") == "mqtt":
+            continue
+
+        device_id = device.get("device_sn")
+        if not device_id:
+            _LOGGER.warning("Device without ID found during setup: %s", device)
+            continue
+
+        if device_id in added_devices:
+            _LOGGER.debug("Device %s already added via MQTT, skipping cloud version", device_id)
+            continue
+
+        device_model = device.get("deviceModel", "")
+        device_name = device.get("deviceName", "")
+
+        _LOGGER.info(
+            "Setting up cloud vacuum entity - ID: %s, Name: %s, Model: %s",
+            device_id,
+            device_name or "Unknown",
+            device_model or "Unknown"
+        )
+
+        config = {
+            "device_id": device_id,
+            "device_model": device_model,
+            "debug": False,
+        }
+        shared_connect = SharedConnect(config)
+
+        entities.append(
+            EufyCleanVacuum(
+                coordinator,
+                device_id,
+                device_name,
+                shared_connect,
+            )
+        )
+        added_devices.add(device_id)
+
+    _LOGGER.info("Adding %d unique vacuum entities to Home Assistant", len(entities))
     async_add_entities(entities)
 
 class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVacuumEntity):
@@ -155,18 +206,38 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
         )
 
     @property
-    def battery_level(self) -> int | None:
-        """Return the battery level of the vacuum cleaner."""
-        device_data = self.coordinator.data.get("devices", {}).get(self._device_id, {})
-        level = device_data.get("battery_level")
-        _LOGGER.debug("Device %s battery level: %s", self._device_id, level)
-        return level
+    def _device(self) -> Dict[str, Any]:
+        """Get current device data."""
+        return next(
+            (d for d in self.coordinator.data.get("devices", [])
+             if d.get("device_sn") == self._device_id),
+            {}
+        )
 
     @property
-    def state(self) -> str | None:
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return entity specific state attributes."""
+        return {
+            "battery_level": self._device.get("battery_level", 0),
+            "is_online": self._device.get("is_online", False),
+            "raw_state": self._device.get("raw_state", {}),
+            "dps": self._device.get("dps", {}),
+        }
+
+    @property
+    def battery_level(self) -> int | None:
+        """Return the battery level of the vacuum cleaner."""
+        return self._device.get("battery_level")
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self._device.get("is_online", False)
+
+    @property
+    def state(self) -> str:
         """Return the state of the vacuum cleaner."""
-        device_data = self.coordinator.data.get("devices", {}).get(self._device_id, {})
-        raw_state = str(device_data.get("state", "unknown")).lower()
+        raw_state = str(self._device.get("state", "unknown")).lower()
 
         # Map the raw state to Home Assistant state
         ha_state = EUFY_TO_HA_STATE.get(raw_state)
@@ -176,7 +247,7 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
                 "Unknown state received for device %s - Raw State: '%s', Full Device Data: %s",
                 self._device_id,
                 raw_state,
-                device_data
+                self._device
             )
         else:
             _LOGGER.debug(
@@ -188,58 +259,19 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
 
         return ha_state or "unknown"
 
-    @property
-    def available(self) -> bool:
-        """Return True if entity is available."""
-        device_data = self.coordinator.data.get("devices", {}).get(self._device_id, {})
-        is_available = device_data.get("is_online", False)
-        _LOGGER.debug("Device %s availability: %s", self._device_id, is_available)
-        return is_available
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        """Return device info."""
-        device_data = self.coordinator.data.get("devices", {}).get(self._device_id, {})
-        return {
-            "identifiers": {("eufy_clean", self._device_id)},
-            "name": device_data.get("name", self._attr_name),
-            "model": device_data.get("model", "Unknown"),
-            "manufacturer": "Eufy",
-            "via_device": ("eufy_clean", "hub"),
-        }
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return device specific state attributes."""
-        device_data = self.coordinator.data.get("devices", {}).get(self._device_id, {})
-        return {
-            "device_type": device_data.get("type", "unknown"),
-            "is_online": device_data.get("is_online", False),
-            "raw_state": device_data.get("raw_state", {}),
-            "error_code": device_data.get("error_code", 0),
-            "work_status": device_data.get("state", "unknown"),
-        }
-
     async def async_start(self) -> None:
         """Start or resume the cleaning task."""
-        _LOGGER.info("Starting cleaning for device %s", self._device_id)
-        await self._shared_connect.play()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.api.send_command(self._device_id, {"play": True})
 
     async def async_pause(self) -> None:
         """Pause the cleaning task."""
-        _LOGGER.info("Pausing cleaning for device %s", self._device_id)
-        await self._shared_connect.pause()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.api.send_command(self._device_id, {"play": False})
 
-    async def async_stop(self, **kwargs: Any) -> None:
+    async def async_stop(self) -> None:
         """Stop the cleaning task."""
-        _LOGGER.info("Stopping cleaning for device %s", self._device_id)
-        await self._shared_connect.stop()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.api.send_command(self._device_id, {"play": False})
 
-    async def async_return_to_base(self, **kwargs: Any) -> None:
+    async def async_return_to_base(self) -> None:
         """Set the vacuum cleaner to return to the dock."""
-        _LOGGER.info("Returning to base for device %s", self._device_id)
-        await self._shared_connect.go_home()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.api.send_command(self._device_id, {"go_home": True})
+

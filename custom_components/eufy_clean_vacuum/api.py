@@ -46,19 +46,31 @@ class EufyCleanApi:
         return devices
 
     async def get_mqtt_devices(self) -> List[Dict[str, Any]]:
-        """Get MQTT devices."""
-        devices = []
-        for device in self.login.mqtt_devices:
+        """Get list of MQTT devices."""
+        if not self.login.mqtt_connect:
+            _LOGGER.warning("No MQTT connection available")
+            return []
+
+        # Get cloud devices first to get device model
+        cloud_devices = await self.get_cloud_devices()
+        if cloud_devices:
+            device = cloud_devices[0]  # Use first device for now
             device_id = device.get("device_sn")
-            if device_id:
-                devices.append({
-                    "device_sn": device_id,
-                    "deviceModel": device.get("deviceModel", ""),
-                    "deviceName": device.get("alias_name") or device.get("device_name") or device.get("name", ""),
-                    "dps": device.get("dps", {}),
-                    "mqtt": True
-                })
-        return devices
+            device_model = device.get("deviceModel")
+            if device_id and device_model:
+                _LOGGER.info("Setting up MQTT with device info - ID: %s, Model: %s", device_id, device_model)
+                # First set device info
+                await self.login.mqtt_connect.set_device_info(device_id, device_model)
+                # Then connect
+                await self.login.mqtt_connect.connect()
+            else:
+                _LOGGER.warning("Could not get device info from cloud device: %s", device)
+                await self.login.mqtt_connect.connect()
+        else:
+            _LOGGER.warning("No cloud devices found for MQTT connection")
+            await self.login.mqtt_connect.connect()
+
+        return await self.login.mqtt_connect.get_device_list()
 
     async def get_all_devices(self) -> List[Dict[str, Any]]:
         """Get all devices."""

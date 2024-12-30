@@ -2,6 +2,8 @@
 from datetime import timedelta
 import logging
 from typing import Any, Dict, Callable
+import time
+import json
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -18,7 +20,7 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self.api = api
         self.platforms: list[str] = []
         self._device_listeners: Dict[str, Callable] = {}
-        self._data = {"devices": {}}
+        self._devices = []
 
         super().__init__(
             hass,
@@ -34,198 +36,167 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         else:
             _LOGGER.warning("No MQTT connection available, devices will update via cloud only")
 
-    @callback
     def _handle_mqtt_message(self, client: Any, userdata: Any, msg: Any) -> None:
-        """Handle incoming MQTT message."""
+        """Handle MQTT message."""
         try:
-            import json
-            payload = json.loads(msg.payload.decode())
-            _LOGGER.info("Received MQTT message - Topic: %s, Full Payload: %s", msg.topic, payload)
+            _LOGGER.info("Received MQTT message - Topic: %s", msg.topic)
 
-            if "payload" in payload and "data" in payload["payload"]:
-                data = payload["payload"]["data"]
-                device_id = msg.topic.split("/")[3]  # Extract device ID from topic
-                _LOGGER.info("Processing MQTT update - Device ID: %s, Data: %s", device_id, data)
+            # Parse the message
+            try:
+                payload = json.loads(msg.payload.decode())
+                _LOGGER.debug("Parsed payload: %s", payload)
+            except json.JSONDecodeError as err:
+                _LOGGER.error("Failed to decode MQTT message: %s\nPayload: %s", err, msg.payload.decode())
+                return
 
-                # Update device data
-                if device_id in self._data["devices"]:
-                    device_data = self._data["devices"][device_id]
-                    old_state = device_data.get("state")
-                    old_battery = device_data.get("battery_level")
-
-                    # Extract DPS data
-                    dps = data.get("dps", {})
-                    _LOGGER.info(
-                        "MQTT DPS data for device %s:\n"
-                        "- Raw DPS: %s\n"
-                        "- Legacy Work Status (15): %s\n"
-                        "- Novel Work Status (153): %s\n"
-                        "- Legacy Battery (104): %s\n"
-                        "- Novel Battery (163): %s",
-                        device_id,
-                        dps,
-                        dps.get("15"),
-                        dps.get("153"),
-                        dps.get("104"),
-                        dps.get("163")
-                    )
-
-                    # Get state from DPS data
-                    work_status = dps.get("15") or dps.get("153")  # Try both legacy and novel DPS IDs
-                    battery_level = dps.get("104") or dps.get("163")  # Try both legacy and novel DPS IDs
-
-                    device_data.update({
-                        "battery_level": battery_level or device_data.get("battery_level", 0),
-                        "state": work_status or device_data.get("state", "unknown"),
-                        "is_online": True,
-                        "raw_state": data,
-                        "dps": dps
-                    })
-
-                    _LOGGER.info(
-                        "Device %s (%s) state update:\n"
-                        "- State: %s -> %s\n"
-                        "- Battery: %s -> %s\n"
-                        "- DPS: %s\n"
-                        "- Raw State: %s",
-                        device_data.get("name", device_id),
-                        device_id,
-                        old_state,
-                        device_data["state"],
-                        old_battery,
-                        device_data["battery_level"],
-                        dps,
-                        data
-                    )
-
-                    # Notify listeners
-                    self.async_set_updated_data(self._data)
-                else:
-                    _LOGGER.warning("Received MQTT update for unknown device: %s", device_id)
+            # Extract device ID from topic (format: cmd/eufy_home/MODEL/ID/res)
+            topic_parts = msg.topic.split("/")
+            if len(topic_parts) >= 4:
+                device_id = topic_parts[3]
+                _LOGGER.info("Processing message for device: %s", device_id)
             else:
-                _LOGGER.warning("Unexpected MQTT message format - Payload: %s", payload)
+                _LOGGER.warning("Invalid topic format: %s", msg.topic)
+                return
+
+            # Extract data from payload
+            if "payload" in payload:
+                # Handle string or dict payload
+                if isinstance(payload["payload"], str):
+                    data = json.loads(payload["payload"])
+                else:
+                    data = payload["payload"]
+                _LOGGER.info("Extracted data: %s", data)
+
+                # Get DPS data
+                if "data" in data:
+                    dps = data["data"]
+                    _LOGGER.info(
+                        "DPS data for device %s:\n"
+                        "Raw data: %s\n"
+                        "DPS data: %s\n"
+                        "Keys: %s",
+                        device_id,
+                        data,
+                        dps,
+                        list(dps.keys()) if isinstance(dps, dict) else "Not a dict"
+                    )
+
+                    # Check if we already know about this device
+                    device = next((d for d in self._devices if d.get("device_sn") == device_id), None)
+                    if not device:
+                        # Get device info from cloud devices
+                        cloud_device = next((d for d in self._devices if d.get("device_sn") == device_id), None)
+                        if cloud_device:
+                            _LOGGER.info("Found matching cloud device for MQTT device %s", device_id)
+                            # Create new device entry from cloud data
+                            device = {
+                                "device_id": device_id,
+                                "device_sn": device_id,
+                                "name": cloud_device.get("deviceName", ""),
+                                "model": cloud_device.get("deviceModel", ""),
+                                "type": "mqtt",
+                                "battery_level": 0,
+                                "state": "unknown",
+                                "is_online": True,
+                                "raw_state": data,
+                                "dps": dps,
+                                "is_novel_api": False
+                            }
+                            self._devices.append(device)
+                            _LOGGER.info("Added new device from MQTT: %s", device)
+                        else:
+                            _LOGGER.warning("Received MQTT update for unknown device: %s", device_id)
+                            # Create basic device entry
+                            device = {
+                                "device_id": device_id,
+                                "device_sn": device_id,
+                                "name": data.get("deviceName", ""),
+                                "model": data.get("deviceModel", ""),
+                                "type": "mqtt",
+                                "battery_level": 0,
+                                "state": "unknown",
+                                "is_online": True,
+                                "raw_state": data,
+                                "dps": dps,
+                                "is_novel_api": False
+                            }
+                            self._devices.append(device)
+                            _LOGGER.info("Added new device from MQTT without cloud data: %s", device)
+
+                    # Update device data
+                    if device:
+                        _LOGGER.info("Updating device %s with new data", device_id)
+                        device.update({
+                            "raw_state": data,
+                            "dps": dps,
+                            "is_online": True,
+                            "last_update": int(time.time() * 1000)
+                        })
+
+                        # Check for novel API
+                        novel_dps_keys = ["152", "153", "154", "155", "158", "160", "163", "173", "177"]
+                        if any(k in dps for k in novel_dps_keys):
+                            _LOGGER.info("Novel API detected for device %s", device_id)
+                            device["is_novel_api"] = True
+
+                        # Schedule update on event loop
+                        self.hass.loop.call_soon_threadsafe(
+                            self.async_set_updated_data,
+                            {"devices": self._devices}
+                        )
+                else:
+                    _LOGGER.warning("No 'data' field in payload: %s", data)
+            else:
+                _LOGGER.warning("No 'payload' field in message: %s", payload)
+
         except Exception as err:
-            _LOGGER.error("Error handling MQTT message: %s\nPayload: %s", err, msg.payload.decode())
+            _LOGGER.error("Error handling MQTT message: %s", err)
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Update data via library."""
         try:
-            _LOGGER.debug("Starting periodic update of devices")
-
-            # Get both cloud and MQTT devices
+            # First get cloud devices
             cloud_devices = await self.api.get_cloud_devices()
-            mqtt_devices = await self.api.get_mqtt_devices()
+            _LOGGER.info("Got %d cloud devices from API", len(cloud_devices))
 
-            _LOGGER.info("Found %d cloud devices and %d MQTT devices", len(cloud_devices), len(mqtt_devices))
+            # Update internal device list with cloud devices
+            self._devices = cloud_devices
 
-            devices = self._data["devices"].copy()  # Preserve existing MQTT data
+            # Then initialize MQTT connection if needed
+            if not self.api.login.mqtt_connect and cloud_devices:
+                _LOGGER.info("Initializing MQTT connection with %d cloud devices", len(cloud_devices))
+                await self.api.init()
+                # Set coordinator reference in MQTT connect
+                if self.api.login.mqtt_connect:
+                    self.api.login.mqtt_connect.coordinator = self
+                    _LOGGER.info("Set coordinator reference in MQTT connect")
+            elif not cloud_devices:
+                _LOGGER.warning("No cloud devices found, skipping MQTT initialization")
+            else:
+                _LOGGER.debug("MQTT connection already initialized")
 
-            # Process cloud devices
-            for device in cloud_devices:
-                device_sn = device.get("device_sn")
-                if device_sn:
-                    dps = device.get("dps", {})
-                    _LOGGER.info(
-                        "Processing cloud device - SN: %s, Name: %s, Model: %s\n"
-                        "- DPS: %s\n"
-                        "- DPS Keys: %s",
-                        device_sn,
-                        device.get("deviceName", "Unknown"),
-                        device.get("deviceModel", "Unknown"),
-                        dps,
-                        list(dps.keys()) if dps else []
-                    )
+            # Get MQTT devices if connection is available
+            if self.api.login.mqtt_connect:
+                mqtt_devices = await self.api.get_mqtt_devices()
+                _LOGGER.info("Got %d MQTT devices", len(mqtt_devices))
 
-                    # Get state from DPS data
-                    work_status = dps.get("15") or dps.get("153")  # Try both legacy and novel DPS IDs
-                    battery_level = dps.get("104") or dps.get("163")  # Try both legacy and novel DPS IDs
+                # Update or add MQTT devices
+                for mqtt_device in mqtt_devices:
+                    device_id = mqtt_device.get("device_sn")
+                    if not device_id:
+                        continue
 
-                    # Check for novel API
-                    is_novel = any(k in dps for k in ["152", "153", "154", "155", "158", "160", "163", "173", "177"])
-                    if is_novel:
-                        _LOGGER.info("Novel API detected for cloud device %s", device_sn)
-
-                    devices[device_sn] = {
-                        "device_id": device_sn,  # Keep device_id for backward compatibility
-                        "device_sn": device_sn,
-                        "name": device.get("deviceName", ""),
-                        "model": device.get("deviceModel", ""),
-                        "type": "cloud",
-                        "battery_level": battery_level or 0,
-                        "state": work_status or "unknown",
-                        "is_online": device.get("online", False),
-                        "raw_state": device,
-                        "dps": dps,
-                        "is_novel_api": is_novel
-                    }
-                else:
-                    _LOGGER.warning("Found cloud device without SN: %s", device)
-
-            # Process MQTT devices (only update if not recently updated by MQTT)
-            for device in mqtt_devices:
-                device_sn = device.get("device_sn")
-                if device_sn and device_sn not in devices:
-                    dps = device.get("dps", {})
-                    _LOGGER.info(
-                        "Processing MQTT device - SN: %s, Name: %s, Model: %s\n"
-                        "- DPS: %s\n"
-                        "- DPS Keys: %s",
-                        device_sn,
-                        device.get("deviceName", "Unknown"),
-                        device.get("deviceModel", "Unknown"),
-                        dps,
-                        list(dps.keys()) if dps else []
-                    )
-
-                    # Get state from DPS data
-                    work_status = dps.get("15") or dps.get("153")  # Try both legacy and novel DPS IDs
-                    battery_level = dps.get("104") or dps.get("163")  # Try both legacy and novel DPS IDs
-
-                    # Check for novel API
-                    is_novel = any(k in dps for k in ["152", "153", "154", "155", "158", "160", "163", "173", "177"])
-                    if is_novel:
-                        _LOGGER.info("Novel API detected for MQTT device %s", device_sn)
-
-                    devices[device_sn] = {
-                        "device_id": device_sn,  # Keep device_id for backward compatibility
-                        "device_sn": device_sn,
-                        "name": device.get("deviceName", ""),
-                        "model": device.get("deviceModel", ""),
-                        "type": "mqtt",
-                        "battery_level": battery_level or 0,
-                        "state": work_status or "unknown",
-                        "is_online": True,  # MQTT devices are always online when we receive data
-                        "raw_state": device,
-                        "dps": dps,
-                        "is_novel_api": is_novel
-                    }
-                else:
-                    if not device_sn:
-                        _LOGGER.warning("Found MQTT device without SN: %s", device)
+                    # Update existing device or add new one
+                    existing_device = next((d for d in self._devices if d.get("device_sn") == device_id), None)
+                    if existing_device:
+                        existing_device.update(mqtt_device)
+                        existing_device["type"] = "mqtt"
                     else:
-                        _LOGGER.debug("Skipping MQTT device %s as it was recently updated", device_sn)
+                        mqtt_device["type"] = "mqtt"
+                        self._devices.append(mqtt_device)
 
-            _LOGGER.info("Total devices after update: %d", len(devices))
-            for device_sn, device in devices.items():
-                _LOGGER.info(
-                    "Device status - SN: %s, Name: %s, Type: %s\n"
-                    "- Online: %s\n"
-                    "- State: %s\n"
-                    "- DPS: %s\n"
-                    "- DPS Keys: %s\n"
-                    "- Novel API: %s",
-                    device_sn,
-                    device.get("name", "Unknown"),
-                    device.get("type", "unknown"),
-                    device.get("is_online", False),
-                    device.get("state", "unknown"),
-                    device.get("dps", {}),
-                    list(device.get("dps", {}).keys()),
-                    device.get("is_novel_api", False)
-                )
-
-            self._data = {"devices": devices}
-            return self._data
+            _LOGGER.info("Total devices after update: %d", len(self._devices))
+            return {"devices": self._devices}
         except Exception as err:
             _LOGGER.error("Error communicating with API: %s", err)
-            raise UpdateFailed(f"Error communicating with API: {err}") from err
+            raise

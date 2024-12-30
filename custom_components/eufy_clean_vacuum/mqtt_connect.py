@@ -39,6 +39,8 @@ class MQTTConnect:
         self.devices = []
         self.connected = False
         self.device_model = None
+        self.device_id = None
+        self._tls_configured = False  # Track TLS configuration state
 
     def _on_log(self, client: mqtt.Client, userdata: Any, level: int, buf: str) -> None:
         """Handle MQTT log messages."""
@@ -59,9 +61,9 @@ class MQTTConnect:
             _LOGGER.info("Connected to MQTT broker with flags: %s", flags)
 
             # Subscribe to response topic
-            if self.device_model:
+            if self.device_model and self.device_id:
                 # Subscribe to command response topic only, as per TypeScript implementation
-                topic = f"cmd/eufy_home/{self.device_model}/{self.deviceId}/res"
+                topic = f"cmd/eufy_home/{self.device_model}/{self.device_id}/res"
                 _LOGGER.info("Subscribing to device-specific topic: %s", topic)
                 result, mid = client.subscribe(topic, 0)
                 if result == mqtt.MQTT_ERR_SUCCESS:
@@ -69,7 +71,7 @@ class MQTTConnect:
                 else:
                     _LOGGER.warning("Failed to subscribe to %s (Result: %s)", topic, result)
             else:
-                _LOGGER.warning("No device model available, cannot subscribe to specific topics")
+                _LOGGER.warning("No device model or ID available, cannot subscribe to specific topics")
         else:
             self.connected = False
             _LOGGER.error("Failed to connect to MQTT broker with result code %s", rc)
@@ -87,73 +89,77 @@ class MQTTConnect:
         try:
             _LOGGER.info("Received MQTT message - Topic: %s", msg.topic)
             _LOGGER.debug("Raw payload: %s", msg.payload.decode())
-            payload = json.loads(msg.payload.decode())
-            _LOGGER.info("Decoded payload: %s", payload)
 
-            # Extract device ID from topic
+            # Parse the message
+            message_str = msg.payload.decode()
+            _LOGGER.debug("Decoded message string: %s", message_str)
+
+            payload = json.loads(message_str)
+            _LOGGER.info("Parsed payload: %s", payload)
+
+            # Extract device ID from topic (format: cmd/eufy_home/MODEL/ID/res)
             topic_parts = msg.topic.split("/")
-            device_id = None
-
             if len(topic_parts) >= 4:
                 device_id = topic_parts[3]
                 _LOGGER.info("Processing message for device: %s", device_id)
+            else:
+                _LOGGER.warning("Invalid topic format: %s", msg.topic)
+                return
 
-            if device_id and "payload" in payload and "data" in payload["payload"]:
-                data = payload["payload"]["data"]
-                _LOGGER.info("Processing data: %s", data)
+            # Extract data from payload
+            if "payload" in payload:
+                # Handle string or dict payload
+                if isinstance(payload["payload"], str):
+                    data = json.loads(payload["payload"])
+                else:
+                    data = payload["payload"]
+                _LOGGER.info("Extracted data: %s", data)
 
-                # Extract DPS data
-                dps = data.get("dps", {})
-                _LOGGER.info(
-                    "DPS data for device %s:\n"
-                    "- Raw DPS: %s\n"
-                    "- Legacy Work Status (15): %s\n"
-                    "- Novel Work Status (153): %s\n"
-                    "- Legacy Battery (104): %s\n"
-                    "- Novel Battery (163): %s\n"
-                    "- All Keys: %s",
-                    device_id,
-                    dps,
-                    dps.get("15"),
-                    dps.get("153"),
-                    dps.get("104"),
-                    dps.get("163"),
-                    list(dps.keys()) if dps else []
-                )
-
-                device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
-                if device:
-                    _LOGGER.info("Updating existing device %s with new data", device_id)
-                    old_dps = device.get("dps", {})
-                    _LOGGER.info("Old DPS data: %s", old_dps)
-                    _LOGGER.info("New DPS data: %s", dps)
+                # Get DPS data
+                if "data" in data:
+                    dps = data["data"]
+                    _LOGGER.info(
+                        "DPS data for device %s:\n"
+                        "Raw data: %s\n"
+                        "DPS data: %s\n"
+                        "Keys: %s",
+                        device_id,
+                        data,
+                        dps,
+                        list(dps.keys()) if isinstance(dps, dict) else "Not a dict"
+                    )
 
                     # Update device data
-                    device.update({
-                        "dps": dps,
-                        "last_update": int(time.time() * 1000)
-                    })
-
-                    # Check if we need to update API type
-                    if not hasattr(self, 'novel_api'):
-                        self.novel_api = False
-                    if not self.novel_api and any(k in dps for k in ["152", "153", "154", "155", "158", "160", "163", "173", "177"]):
-                        _LOGGER.info("Novel API detected for device %s", device_id)
-                        self.novel_api = True
-                else:
-                    _LOGGER.info("Adding new device from MQTT: %s with DPS: %s", device_id, dps)
-                    self.devices.append({
+                    device_data = {
                         "device_sn": device_id,
+                        "deviceName": data.get("deviceName", ""),
+                        "deviceModel": self.device_model,
                         "dps": dps,
                         "mqtt": True,
                         "last_update": int(time.time() * 1000)
-                    })
+                    }
+
+                    # Update or create device
+                    device = next((d for d in self.devices if d.get("device_sn") == device_id), None)
+                    if device:
+                        _LOGGER.info("Updating existing device %s with new data", device_id)
+                        device.update(device_data)
+                    else:
+                        _LOGGER.info("Adding new device from MQTT: %s", device_id)
+                        self.devices.append(device_data)
+
+                    # Notify coordinator if available
+                    if hasattr(self, "coordinator") and self.coordinator:
+                        self.coordinator._handle_mqtt_message(device_id, device_data)
+                else:
+                    _LOGGER.warning("No 'data' field in payload: %s", data)
             else:
-                _LOGGER.warning("Unexpected message format or missing device ID - Topic: %s, Payload: %s", msg.topic, payload)
+                _LOGGER.warning("No 'payload' field in message: %s", payload)
+
         except json.JSONDecodeError as err:
-            _LOGGER.error("Failed to decode MQTT message on topic %s: %s\nPayload: %s", msg.topic, err, msg.payload.decode())
+            _LOGGER.error("Failed to decode MQTT message: %s\nPayload: %s", err, msg.payload.decode())
         except Exception as err:
-            _LOGGER.error("Error handling MQTT message on topic %s: %s\nPayload: %s", msg.topic, err, msg.payload.decode())
+            _LOGGER.error("Error handling MQTT message: %s\nPayload: %s", err, msg.payload.decode())
 
     def _on_disconnect(self, client: mqtt.Client, userdata: Any, rc: int) -> None:
         """Handle disconnection."""
@@ -177,51 +183,55 @@ class MQTTConnect:
             }
             _LOGGER.error("Disconnect reason: %s", error_messages.get(rc, "Unknown error"))
 
-    async def connect(self, device_model: str = None) -> None:
+    async def connect(self) -> None:
         """Connect to MQTT broker."""
         try:
             endpoint = self.mqtt_config.get("endpoint_addr", "mqtt.eufylife.com")
             if not endpoint:
                 raise CannotConnect("No MQTT endpoint available")
 
-            self.device_model = device_model
             _LOGGER.debug("Connecting to MQTT broker at %s:8883", endpoint)
+            _LOGGER.info("Device info for MQTT - Model: %s, ID: %s", self.device_model, self.device_id)
 
-            # Set up TLS with certificate strings
-            def setup_tls():
-                _LOGGER.debug("Setting up TLS")
-                # Create temporary files for certificates
-                cert_fd, cert_file = tempfile.mkstemp()
-                key_fd, key_file = tempfile.mkstemp()
+            # Set up TLS only if not already configured
+            if not self._tls_configured:
+                def setup_tls():
+                    _LOGGER.debug("Setting up TLS")
+                    # Create temporary files for certificates
+                    cert_fd, cert_file = tempfile.mkstemp()
+                    key_fd, key_file = tempfile.mkstemp()
 
-                try:
-                    # Write certificate data
-                    cert_data = self.mqtt_config.get("certificate_pem", "").encode("utf-8")
-                    key_data = self.mqtt_config.get("private_key", "").encode("utf-8")
-                    os.write(cert_fd, cert_data)
-                    os.write(key_fd, key_data)
-                    os.close(cert_fd)
-                    os.close(key_fd)
-
-                    # Set up TLS with the certificate files
-                    self.client.tls_set(
-                        certfile=cert_file,
-                        keyfile=key_file,
-                        cert_reqs=ssl.CERT_NONE,
-                        tls_version=ssl.PROTOCOL_TLS,
-                        ciphers=None
-                    )
-                    self.client.tls_insecure_set(True)
-                    _LOGGER.debug("TLS setup completed")
-                finally:
-                    # Clean up temporary files
                     try:
-                        os.unlink(cert_file)
-                        os.unlink(key_file)
-                    except Exception as e:
-                        _LOGGER.warning("Error cleaning up certificate files: %s", e)
+                        # Write certificate data
+                        cert_data = self.mqtt_config.get("certificate_pem", "").encode("utf-8")
+                        key_data = self.mqtt_config.get("private_key", "").encode("utf-8")
+                        os.write(cert_fd, cert_data)
+                        os.write(key_fd, key_data)
+                        os.close(cert_fd)
+                        os.close(key_fd)
 
-            await asyncio.get_event_loop().run_in_executor(_EXECUTOR, setup_tls)
+                        # Set up TLS with the certificate files
+                        self.client.tls_set(
+                            certfile=cert_file,
+                            keyfile=key_file,
+                            cert_reqs=ssl.CERT_NONE,
+                            tls_version=ssl.PROTOCOL_TLS_CLIENT,
+                            ciphers=None
+                        )
+                        self.client.tls_insecure_set(True)
+                        self._tls_configured = True
+                        _LOGGER.debug("TLS setup completed")
+                    finally:
+                        # Clean up temporary files
+                        try:
+                            os.unlink(cert_file)
+                            os.unlink(key_file)
+                        except Exception as e:
+                            _LOGGER.warning("Error cleaning up certificate files: %s", e)
+
+                await asyncio.get_event_loop().run_in_executor(_EXECUTOR, setup_tls)
+            else:
+                _LOGGER.debug("TLS already configured, skipping setup")
 
             # Connect in a thread
             def do_connect():
@@ -236,6 +246,19 @@ class MQTTConnect:
 
             await asyncio.get_event_loop().run_in_executor(_EXECUTOR, do_connect)
             _LOGGER.debug("Successfully connected to MQTT broker")
+
+            # Add initial device if we have the info
+            if self.device_id and self.device_model:
+                _LOGGER.info("Adding initial device to list - ID: %s, Model: %s", self.device_id, self.device_model)
+                self.devices.append({
+                    "device_sn": self.device_id,
+                    "deviceName": "",  # Will be updated from MQTT messages
+                    "deviceModel": self.device_model,
+                    "dps": {},
+                    "mqtt": True,
+                    "last_update": int(time.time() * 1000)
+                })
+
         except Exception as err:
             _LOGGER.error("Error connecting to MQTT broker: %s", err)
             raise CannotConnect(f"Failed to connect to MQTT broker: {err}")
@@ -306,3 +329,9 @@ class MQTTConnect:
         except Exception as err:
             _LOGGER.error("Error sending command to device: %s", err)
             raise
+
+    async def set_device_info(self, device_id: str, device_model: str) -> None:
+        """Set device information."""
+        self.device_id = device_id
+        self.device_model = device_model
+        _LOGGER.info("Set device info - ID: %s, Model: %s", device_id, device_model)
