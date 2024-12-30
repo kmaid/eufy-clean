@@ -1,0 +1,62 @@
+name: Deploy to Home Assistant
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  update-code:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup WireGuard
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wireguard resolvconf
+          sudo mkdir -p /etc/wireguard
+          echo "${{ secrets.WG_CONFIG_FILE }}" | sed 's/\[Interface\]/[Interface]\nDNS = 192.168.50.1/' | sudo tee /etc/wireguard/wg0.conf > /dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo wg-quick up wg0
+          sudo rm /etc/resolv.conf
+          echo "nameserver 192.168.50.1" | sudo tee /etc/resolv.conf
+
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${SSH_PRIVATE_KEY}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "StrictHostKeyChecking=no" >> ~/.ssh/config
+          echo "UserKnownHostsFile=/dev/null" >> ~/.ssh/config
+
+      - name: Update Code via SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          SSH_CMD="cd /var/media-server/automation/homeassistant/eufy-clean"
+          SSH_CMD="${SSH_CMD} && if [[ -n \$(git status -s) ]]; then"
+          SSH_CMD="${SSH_CMD} echo 'Error: There are uncommitted changes in the repository'"
+          SSH_CMD="${SSH_CMD} && git status && exit 1; fi"
+          SSH_CMD="${SSH_CMD} && git fetch origin"
+          SSH_CMD="${SSH_CMD} && git checkout main"
+          SSH_CMD="${SSH_CMD} && git pull --rebase origin main"
+
+          ssh -p 22 "${SSH_USER}@${SSH_HOST}" "${SSH_CMD}"
+
+      - name: Restart Home Assistant
+        env:
+          HA_TOKEN: ${{ secrets.HA_TOKEN }}
+          HA_URL: ${{ secrets.HA_URL }}
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer $HA_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$HA_URL/api/services/homeassistant/restart"
+
+      - name: Cleanup WireGuard
+        if: always()
+        run: sudo wg-quick down wg0
