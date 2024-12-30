@@ -3,7 +3,7 @@
   "name": "Eufy Clean Vacuum",
   "config_flow": true,
   "documentation": "https://github.com/kmaid/eufy-clean",
-  "requirements": [],
+  "requirements": ["aiohttp>=3.8.0"],
   "dependencies": [],
   "codeowners": ["@kmaid"],
   "version": "0.0.1"

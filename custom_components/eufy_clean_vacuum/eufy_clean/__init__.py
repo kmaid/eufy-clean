@@ -1,21 +1,26 @@
 """Eufy Clean API client."""
 import logging
+import uuid
 from typing import Dict, List, Optional
+
+from .controllers.login import EufyLogin
 
 _LOGGER = logging.getLogger(__name__)
 
 class EufyClean:
     """Eufy Clean API client."""
 
-    def __init__(self, username: str, password: str):
+    def __init__(self, username: str, password: str, openudid: Optional[str] = None):
         """Initialize the API client."""
-        self.username = username
-        self.password = password
+        if not openudid:
+            openudid = str(uuid.uuid4())
+
+        self.login = EufyLogin(username, password, openudid)
 
     async def init(self) -> None:
-        """Test the credentials by attempting to initialize."""
-        # For now, just log the attempt. We'll add real auth later
-        _LOGGER.debug("Testing connection with username: %s", self.username)
-        # In a real implementation, this would try to authenticate
-        # For now, we'll just pretend it worked
-        return
+        """Initialize connection and authenticate."""
+        await self.login.init()
+
+    async def close(self) -> None:
+        """Close all connections."""
+        await self.login.close()
