@@ -9,9 +9,9 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
 
 from .eufy_clean import EufyClean
+from .exceptions import InvalidAuth, CannotConnect
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,9 +23,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_PASSWORD): str,
     }
 )
-
-class CannotConnect(HomeAssistantError):
-    """Error to indicate we cannot connect."""
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Eufy Clean Vacuum."""
@@ -45,14 +42,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     password=user_input[CONF_PASSWORD],
                 )
                 await api.init()
+                await api.close()  # Close the connection after successful test
 
                 return self.async_create_entry(
                     title=user_input[CONF_USERNAME],
                     data=user_input,
                 )
-            except Exception as err:
-                _LOGGER.error("Failed to connect to Eufy Clean API: %s", err)
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except CannotConnect:
                 errors["base"] = "cannot_connect"
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected error occurred: %s", err)
+                errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="user",
