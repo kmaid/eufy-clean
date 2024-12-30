@@ -1,12 +1,10 @@
 {
   "domain": "eufy_clean_vacuum",
   "name": "Eufy Clean Vacuum",
-  "codeowners": ["@kmaid"],
   "config_flow": true,
-  "dependencies": [],
   "documentation": "https://github.com/kmaid/eufy-clean",
-  "homekit": {},
-  "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "0.1.0"
+  "dependencies": [],
+  "codeowners": ["@kmaid"],
+  "version": "0.0.1"
 }
