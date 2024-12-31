@@ -4,7 +4,6 @@ import json
 import hashlib
 import aiohttp
 import async_timeout
-import time
 from typing import Any, Dict, List, Optional
 
 from .mqtt_connect import MQTTConnect
@@ -227,11 +226,81 @@ class EufyLogin:
             _LOGGER.error("Error getting MQTT credentials: %s", err)
             raise
 
+    async def _get_mqtt_devices(self) -> None:
+        """Get MQTT devices through API."""
+        if not self.user_info:
+            raise CannotConnect("No user info available")
+
+        url = "https://aiot-clean-api-pr.eufylife.com/app/devicerelation/get_device_list"
+        headers = {
+            "content-type": "application/json",
+            "user-agent": "EufyHome-Android-3.1.3-753",
+            "timezone": "Europe/Berlin",
+            "openudid": self.openudid,
+            "language": self.locale.split("-")[0],
+            "country": self.locale.split("-")[1] if "-" in self.locale else "US",
+            "os-version": "Android",
+            "model-type": "PHONE",
+            "app-name": "eufy_home",
+            "x-auth-token": self.user_info["user_center_token"],
+            "gtoken": self.user_info["gtoken"],
+        }
+
+        try:
+            async with async_timeout.timeout(10):
+                async with self.session.post(url, headers=headers, json={"attribute": 3}) as response:
+                    data = await response.json()
+                    _LOGGER.debug("Raw MQTT API response: %s", data)
+
+                    if data.get("data") and data["data"].get("devices"):
+                        devices = []
+                        for device_obj in data["data"]["devices"]:
+                            device = device_obj.get("device", {})
+                            if not device:
+                                continue
+
+                            device_sn = device.get("device_sn")
+                            if not device_sn:
+                                continue
+
+                            # Find model info from cloud devices
+                            model_info = next(
+                                (d for d in self.cloud_devices if d.get("device_sn") == device_sn),
+                                {}
+                            )
+
+                            device_data = {
+                                "device_sn": device_sn,
+                                "deviceName": device.get("name", ""),
+                                "deviceModel": model_info.get("deviceModel", ""),
+                                "product_code": model_info.get("product_code", ""),
+                                "dps": device.get("dps", {}),
+                                "mqtt": True,
+                                "is_online": True,
+                                "type": "mqtt"
+                            }
+                            devices.append(device_data)
+
+                        self.mqtt_devices = devices
+                        _LOGGER.info("Found %d MQTT devices", len(devices))
+                        _LOGGER.debug("MQTT devices: %s", devices)
+                    else:
+                        _LOGGER.warning("No MQTT devices found in API response")
+                        self.mqtt_devices = []
+
+        except Exception as err:
+            _LOGGER.error("Error getting MQTT devices: %s", err)
+            self.mqtt_devices = []
+            raise
+
     async def _connect_mqtt(self) -> None:
         """Connect to MQTT broker."""
         try:
             if not self.mqtt_credentials:
                 raise CannotConnect("No MQTT credentials available")
+
+            # Get MQTT devices first
+            await self._get_mqtt_devices()
 
             if not self.mqtt_connect:
                 _LOGGER.info("Creating new MQTT connection")
@@ -239,11 +308,17 @@ class EufyLogin:
             else:
                 _LOGGER.info("Using existing MQTT connection")
 
-            # Get the device model from the cloud device if available
+            # Get the device model from the MQTT devices if available
             device_id = None
             device_model = None
-            if self.cloud_devices:
-                # Get the first cloud device's info
+            if self.mqtt_devices:
+                # Get the first MQTT device's info
+                mqtt_device = self.mqtt_devices[0]
+                device_id = mqtt_device.get("device_sn")
+                device_model = mqtt_device.get("product_code")
+                _LOGGER.debug("Using device info from MQTT device - ID: %s, Model: %s", device_id, device_model)
+            # Fall back to cloud devices if no MQTT devices
+            elif self.cloud_devices:
                 cloud_device = self.cloud_devices[0]
                 device_id = cloud_device.get("device_sn")
                 device_model = cloud_device.get("product_code")

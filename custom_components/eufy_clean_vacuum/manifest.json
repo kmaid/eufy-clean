@@ -1,11 +1,11 @@
 {
   "domain": "eufy_clean_vacuum",
   "name": "Eufy Clean Vacuum",
-  "config_flow": true,
-  "documentation": "https://github.com/kmaid/eufy-clean-vacuum",
+  "documentation": "https://github.com/kmaid/eufy-clean",
   "dependencies": [],
   "codeowners": ["@kmaid"],
-  "requirements": ["aiohttp>=3.8.0", "async_timeout>=4.0.0"],
-  "iot_class": "cloud_polling",
+  "requirements": ["protobuf>=5", "aiohttp>=3.8.0", "async_timeout>=4.0.0"],
+  "config_flow": true,
+  "iot_class": "cloud_push",
   "version": "0.1.0"
 }

@@ -9,12 +9,6 @@ from homeassistant.core import HomeAssistant
 from .api import EufyCleanApi
 from .base import Base
 from .shared_connect import SharedConnect
-from .constants import (
-    EUFY_CLEAN_WORK_MODE,
-    EUFY_CLEAN_NOVEL_CLEAN_SPEED,
-    EUFY_CLEAN_CONTROL,
-    EUFY_CLEAN_X_SERIES,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
