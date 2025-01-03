@@ -1,58 +1,43 @@
 """Utility functions for Eufy Clean Vacuum."""
 import base64
 import logging
-import os
-import shutil
-import asyncio
 from typing import Any, Dict, List, Optional
 
-from google.protobuf import descriptor_pb2, descriptor_pool, message_factory, text_format
+from .proto.cloud import (
+    work_status_pb2,
+    clean_param_pb2,
+    map_edit_pb2,
+    map_manage_pb2,
+    multi_maps_pb2,
+    app_device_info_pb2,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-async def get_proto_path(proto_file: str) -> str:
-    """Get the absolute path to a proto file."""
-    # Get the path to the custom component directory
-    component_dir = os.path.dirname(__file__)
-    proto_dir = os.path.join(component_dir, "proto", "cloud")
-
-    # Create proto directory if it doesn't exist
-    await asyncio.get_event_loop().run_in_executor(None, lambda: os.makedirs(proto_dir, exist_ok=True))
-
-    proto_path = os.path.join(proto_dir, proto_file)
-
-    # If the proto file doesn't exist, copy it from the original source
-    if not os.path.exists(proto_path):
-        _LOGGER.error("Proto file not found: %s", proto_path)
-        return proto_path
-
-    return proto_path
-
-async def decode_protobuf(proto_file: str, message_type: str, data: str) -> Optional[Dict[str, Any]]:
-    """Decode protobuf data."""
+async def decode_protobuf(proto_module: str, message_type: str, data: str) -> Optional[Dict[str, Any]]:
+    """Decode protobuf data using generated classes."""
     try:
-        # Load the proto file
-        proto_path = await get_proto_path(proto_file)
-        proto_content = await asyncio.get_event_loop().run_in_executor(None, lambda: open(proto_path, "r").read())
+        # Map proto module names to their modules
+        proto_modules = {
+            'work_status': work_status_pb2,
+            'clean_param': clean_param_pb2,
+            'map_edit': map_edit_pb2,
+            'map_manage': map_manage_pb2,
+            'multi_maps': multi_maps_pb2,
+            'app_device_info': app_device_info_pb2,
+        }
 
-        # Create a FileDescriptorSet
-        file_set = descriptor_pb2.FileDescriptorSet()
-        text_format.Parse(proto_content, file_set)
-
-        # Create a descriptor pool
-        pool = descriptor_pool.DescriptorPool()
-        for file_desc in file_set.file:
-            pool.Add(file_desc)
-
-        # Get the message descriptor
-        desc = pool.FindMessageTypeByName(message_type)
-        if not desc:
-            _LOGGER.error("Message type %s not found in proto file", message_type)
+        if proto_module not in proto_modules:
+            _LOGGER.error("Proto module %s is not supported", proto_module)
             return None
 
-        # Create a message factory
-        factory = message_factory.MessageFactory(pool)
-        message_class = factory.GetPrototype(desc)
+        module = proto_modules[proto_module]
+
+        # Get the message class
+        message_class = getattr(module, message_type, None)
+        if not message_class:
+            _LOGGER.error("Message type %s not found in %s module", message_type, proto_module)
+            return None
 
         # Decode base64 data
         binary_data = base64.b64decode(data)
@@ -71,19 +56,26 @@ def message_to_dict(message: Any) -> Dict[str, Any]:
     """Convert protobuf message to dictionary."""
     result = {}
     for field in message.DESCRIPTOR.fields:
+        if not message.HasField(field.name):
+            continue
+
         value = getattr(message, field.name)
         if field.type == field.TYPE_MESSAGE:
             if field.label == field.LABEL_REPEATED:
                 result[field.name] = [message_to_dict(item) for item in value]
             else:
                 result[field.name] = message_to_dict(value)
+        elif field.type == field.TYPE_ENUM:
+            # Get enum name for enum fields
+            enum_type = field.enum_type
+            result[field.name] = enum_type.values_by_number[value].name.lower()
         else:
             result[field.name] = value
     return result
 
-async def get_multi_data(proto_file: str, message_type: str, data: str) -> List[Dict[str, Any]]:
+async def get_multi_data(proto_module: str, message_type: str, data: str) -> List[Dict[str, Any]]:
     """Get multiple data fields from protobuf message."""
-    decoded = await decode_protobuf(proto_file, message_type, data)
+    decoded = await decode_protobuf(proto_module, message_type, data)
     if not decoded:
         return []
 
@@ -94,3 +86,32 @@ async def get_multi_data(proto_file: str, message_type: str, data: str) -> List[
         else:
             result.append({"key": key, "value": value})
     return result
+
+async def decode_dps_protos(dps: Dict[str, Any]) -> Dict[str, Any]:
+    """Decode protobuf messages in DPS values."""
+    decoded = {}
+
+    # Map of DPS keys to their proto modules and message types
+    DPS_PROTO_MAP = {
+        "153": ("clean_param", "CleanParam"),
+        "154": ("clean_param", "CleanParamResponse"),
+        "157": ("work_status", "WorkStatus"),
+        "164": ("map_edit", "MapInfo"),
+        "165": ("multi_maps", "RoomInfo"),
+        "169": ("app_device_info", "DeviceInfo")
+    }
+
+    for dps_key, value in dps.items():
+        if dps_key in DPS_PROTO_MAP and value:
+            try:
+                proto_module, message_type = DPS_PROTO_MAP[dps_key]
+                decoded_value = await decode_protobuf(proto_module, message_type, value)
+                if decoded_value:
+                    decoded[dps_key] = decoded_value
+            except Exception as e:
+                _LOGGER.warning(f"Failed to decode DPS {dps_key}: {e}")
+                decoded[dps_key] = value
+        else:
+            decoded[dps_key] = value
+
+    return decoded

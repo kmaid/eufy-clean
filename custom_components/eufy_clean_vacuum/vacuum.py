@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import base64
 from typing import Any, Dict
 
 from homeassistant.components.vacuum import (
@@ -22,7 +23,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .api import EufyCleanApi
 from .coordinator import EufyCleanDataUpdateCoordinator
 from .shared_connect import SharedConnect
-from .utils import get_multi_data
+from .utils import decode_protobuf
+from .proto.cloud import work_status_pb2
+from .constants import EUFY_CLEAN_CONTROL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +38,20 @@ SUPPORT_EUFY_CLEAN = (
     VacuumEntityFeature.STOP
 )
 
-# Map Eufy states to Home Assistant states
+# Map Eufy protobuf states to Home Assistant states
+PROTO_STATE_MAP = {
+    "standby": STATE_IDLE,
+    "sleep": STATE_IDLE,
+    "fault": STATE_ERROR,
+    "charging": STATE_DOCKED,
+    "fast_mapping": STATE_CLEANING,
+    "cleaning": STATE_CLEANING,
+    "remote_ctrl": STATE_CLEANING,
+    "go_home": STATE_RETURNING,
+    "cruisiing": STATE_CLEANING,
+}
+
+# Map Eufy states to Home Assistant states (for legacy API)
 EUFY_TO_HA_STATE = {
     # Running/Cleaning states
     "running": STATE_CLEANING,
@@ -241,18 +257,15 @@ async def async_setup_entry(
             )
             added_devices.add(device_id)
 
-        if entities:
-            _LOGGER.info("Adding %d unique vacuum entities to Home Assistant", len(entities))
-            async_add_entities(entities)
-        else:
-            _LOGGER.warning("No vacuum entities to add to Home Assistant")
+        _LOGGER.info("Adding %d unique vacuum entities to Home Assistant", len(entities))
+        async_add_entities(entities)
 
     except Exception as err:
-        _LOGGER.error("Error setting up vacuum platform: %s", err)
+        _LOGGER.error("Error setting up Eufy Clean vacuum integration: %s", err)
         raise
 
 class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVacuumEntity):
-    """Eufy Clean Vacuum."""
+    """Eufy Clean Vacuum Entity."""
 
     def __init__(
         self,
@@ -264,167 +277,111 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
         """Initialize the vacuum."""
         super().__init__(coordinator)
         self._device_id = device_id
-        self._attr_name = name
+        self._name = name
         self._shared_connect = shared_connect
         self._attr_supported_features = SUPPORT_EUFY_CLEAN
-        self._attr_unique_id = f"{device_id}"
-        _LOGGER.debug(
-            "Initialized vacuum entity - ID: %s, Name: %s, Unique ID: %s",
-            device_id,
-            name,
-            self._attr_unique_id
-        )
+        self._attr_unique_id = device_id
 
     @property
     def _device(self) -> Dict[str, Any]:
-        """Get current device data."""
+        """Get device data from coordinator."""
+        if not self.coordinator.data:
+            return {}
+        devices = self.coordinator.data.get("devices", [])
         return next(
-            (d for d in self.coordinator.data.get("devices", [])
-             if d.get("device_sn") == self._device_id),
+            (d for d in devices if d.get("device_sn") == self._device_id),
             {}
         )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return entity specific state attributes."""
-        dps = self._device.get("dps", {})
-        attributes = {
-            "battery_level": self._device.get("battery_level", 0),
-            "is_online": self._device.get("is_online", False),
-            "raw_state": self._device.get("raw_state", {}),
-            "dps": dps,
-            "is_novel_api": self._device.get("is_novel_api", False),
-            "device_model": self._device.get("deviceModel", ""),
-            "device_type": self._device.get("type", "unknown"),
-        }
+        """Return device specific state attributes."""
+        device = self._device
+        if not device:
+            return {}
 
-        # Add clean speed
-        if self._device.get("is_novel_api"):
-            if "158" in dps:  # Novel API clean speed
-                speed_index = dps["158"]
-                speeds = list(EUFY_CLEAN_SPEED.values())
-                if 0 <= speed_index < len(speeds):
-                    attributes["clean_speed"] = speeds[speed_index]
-        elif "102" in dps:  # Legacy API clean speed
-            speed = str(dps["102"]).lower()
-            attributes["clean_speed"] = EUFY_CLEAN_SPEED.get(speed, speed)
+        dps = device.get("dps", {})
+        attributes = {}
 
-        # Add work mode
-        if self._device.get("is_novel_api"):
-            if "153" in dps:  # Novel API work mode
-                try:
-                    mode_data = dps["153"]
-                    if isinstance(mode_data, dict) and "Mode" in mode_data:
-                        mode = str(mode_data["Mode"]).lower()
-                        attributes["work_mode"] = EUFY_CLEAN_MODE.get(mode, mode)
-                except Exception:
-                    pass
-        elif "5" in dps:  # Legacy API work mode
-            mode = str(dps["5"]).lower()
-            attributes["work_mode"] = EUFY_CLEAN_MODE.get(mode, mode)
+        # Add raw DPS data for debugging
+        attributes["raw_dps"] = dps
 
-        # Add clean type and mop mode for novel API
-        if self._device.get("is_novel_api") and "154" in dps:
-            try:
-                clean_params = dps["154"]
-                if isinstance(clean_params, dict):
-                    if "cleanType" in clean_params:
-                        clean_type = str(clean_params["cleanType"]).lower()
-                        attributes["clean_type"] = EUFY_CLEAN_TYPE.get(clean_type, clean_type)
-                    if "mopMode" in clean_params:
-                        mop_mode = str(clean_params["mopMode"]).lower()
-                        attributes["mop_mode"] = EUFY_MOP_MODE.get(mop_mode, mop_mode)
-            except Exception:
-                pass
+        # Add battery level
+        if "163" in dps:
+            attributes["battery_level"] = dps["163"]
 
-        # Add error code if present
-        if self._device.get("is_novel_api"):
-            if "177" in dps:  # Novel API error code
-                attributes["error_code"] = dps["177"]
-        elif "106" in dps:  # Legacy API error code
-            attributes["error_code"] = dps["106"]
+        # Add cleaning state details
+        if "151" in dps:
+            attributes["cleaning_enabled"] = dps["151"]
+        if "156" in dps:
+            attributes["docked"] = dps["156"]
 
         return attributes
 
     @property
     def battery_level(self) -> int | None:
         """Return the battery level of the vacuum cleaner."""
-        return self._device.get("battery_level")
+        device = self._device
+        return device.get("dps", {}).get("163")
 
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        return self._device.get("is_online", False)
+        device = self._device
+        return bool(device.get("is_online", False))
 
     @property
     def state(self) -> str:
         """Return the state of the vacuum cleaner."""
-        try:
-            device = next(
-                (d for d in self.coordinator.data.get("devices", [])
-                 if d.get("device_sn") == self._device_id),
-                {}
-            )
-            dps = device.get("dps", {})
+        device = self._device
+        if not device:
+            return STATE_ERROR
 
-            # Check if device is offline
-            if not device.get("is_online", True):
-                return "unavailable"
+        dps = device.get("dps", {})
 
-            # Get state from DPS
-            if "153" in dps:  # Novel API state
-                work_status = dps["153"]
-                if isinstance(work_status, str) and work_status.startswith("Ch"):
-                    # We can't use await here, so we'll just use the raw value
-                    if str(work_status) == "1":
-                        return "cleaning"
-                    elif str(work_status) == "2":
-                        return "returning"
-                    elif str(work_status) == "3":
-                        return "paused"
-                    elif str(work_status) == "4":
-                        return "idle"
-                elif isinstance(work_status, (int, str)):
-                    if str(work_status) == "1":
-                        return "cleaning"
-                    elif str(work_status) == "2":
-                        return "returning"
-                    elif str(work_status) == "3":
-                        return "paused"
-                    elif str(work_status) == "4":
-                        return "idle"
+        # Get state from DPS 158 (main state)
+        state = dps.get("158", "").lower()
 
-            elif "15" in dps:  # Legacy API state
-                state = str(dps["15"]).lower()
-                if state in ["cleaning", "returning", "paused", "idle"]:
-                    return state
+        # Check if the vacuum is docked/charging
+        if dps.get("156", False):  # DPS 156 indicates if docked
+            return STATE_DOCKED
 
-            # If we get here, we couldn't determine the state
-            _LOGGER.warning(
-                "Unknown state received for device %s - Raw State: '%s', Full Device Data: %s",
-                self._device_id,
-                device.get("state", "unknown"),
-                device
-            )
-            return "unknown"
+        # If not docked, then check the main state
+        if state == "1":
+            if dps.get("151", False):  # If cleaning enabled
+                return STATE_CLEANING
+            return STATE_IDLE
+        elif state == "2":
+            return STATE_RETURNING
+        elif state == "3":
+            return STATE_PAUSED
+        elif state == "4":
+            return STATE_IDLE
 
-        except Exception as err:
-            _LOGGER.error("Error getting vacuum state: %s", err)
-            return "error"
+        # Fallback to legacy state mapping
+        return EUFY_TO_HA_STATE.get(state, STATE_ERROR)
 
     async def async_start(self) -> None:
         """Start or resume the cleaning task."""
-        await self.coordinator.api.send_command(self._device_id, {"play": True})
+        await self._shared_connect.send_command(self._device_id, {
+            "method": EUFY_CLEAN_CONTROL["RESUME_TASK"]
+        })
 
     async def async_pause(self) -> None:
         """Pause the cleaning task."""
-        await self.coordinator.api.send_command(self._device_id, {"play": False})
+        await self._shared_connect.send_command(self._device_id, {
+            "method": EUFY_CLEAN_CONTROL["PAUSE_TASK"]
+        })
 
     async def async_stop(self) -> None:
         """Stop the cleaning task."""
-        await self.coordinator.api.send_command(self._device_id, {"play": False})
+        await self._shared_connect.send_command(self._device_id, {
+            "method": EUFY_CLEAN_CONTROL["STOP_TASK"]
+        })
 
     async def async_return_to_base(self) -> None:
         """Set the vacuum cleaner to return to the dock."""
-        await self.coordinator.api.send_command(self._device_id, {"go_home": True})
+        await self._shared_connect.send_command(self._device_id, {
+            "method": EUFY_CLEAN_CONTROL["START_GOHOME"]
+        })
 
