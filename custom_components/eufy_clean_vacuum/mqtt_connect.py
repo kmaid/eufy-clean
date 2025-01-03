@@ -329,9 +329,9 @@ class MQTTConnect:
         except Exception as err:
             _LOGGER.error("Error sending command to device: %s", err)
             raise
-
     async def set_device_info(self, device_id: str, device_model: str) -> None:
         """Set device information."""
         self.device_id = device_id
         self.device_model = device_model
         _LOGGER.info("Set device info - ID: %s, Model: %s", device_id, device_model)
+

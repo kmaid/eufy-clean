@@ -11,7 +11,7 @@ from .exceptions import InvalidAuth, CannotConnect
 
 _LOGGER = logging.getLogger(__name__)
 
-class EufyLogin:
+class EufyCleanLogin:
     """Eufy Clean login controller."""
 
     def __init__(self, username: str, password: str, openudid: str, locale: str = "en") -> None:
