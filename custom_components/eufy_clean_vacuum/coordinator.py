@@ -10,6 +10,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import EufyCleanApi
 from .proto.cloud import work_status_pb2
+from .utils import decode_dps_protos
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,7 +45,13 @@ class EufyCleanDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         try:
             # Get device list and states
             devices = await self.api.async_get_devices()
-            _LOGGER.debug("Got device list: %s", devices)
+
+            # Decode protobuf values in device data
+            for device in devices:
+                if 'dps' in device:
+                    device['decoded_dps'] = await decode_dps_protos(device['dps'])
+
+            _LOGGER.debug("Got device list with decoded values: %s", devices)
 
             # Update our stored data
             self._data = {"devices": devices}

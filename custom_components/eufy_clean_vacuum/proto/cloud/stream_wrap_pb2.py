@@ -11,7 +11,7 @@ from google.protobuf.internal import builder as _builder
 _sym_db = _symbol_database.Default()
 
 
-from . import stream_pb2 as proto_dot_cloud_dot_stream__pb2
+from proto.cloud import stream_pb2 as proto_dot_cloud_dot_stream__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dproto/cloud/stream_wrap.proto\x12\x12proto.cloud.stream\x1a\x18proto/cloud/stream.proto\"E\n\x0eRoomParamsWrap\x12\x33\n\x0broom_params\x18\x01 \x03(\x0b\x32\x1e.proto.cloud.stream.RoomParams\"K\n\x10ObstacleInfoWrap\x12\x37\n\robstacle_info\x18\x01 \x03(\x0b\x32 .proto.cloud.stream.ObstacleInfob\x06proto3')

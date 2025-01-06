@@ -11,7 +11,7 @@ from google.protobuf.internal import builder as _builder
 _sym_db = _symbol_database.Default()
 
 
-from . import common_pb2 as proto_dot_cloud_dot_common__pb2
+from proto.cloud import common_pb2 as proto_dot_cloud_dot_common__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16proto/cloud/misc.proto\x12\x0bproto.cloud\x1a\x18proto/cloud/common.proto\"\x17\n\x06Volume\x12\r\n\x05value\x18\x01 \x01(\r\"(\n\x05Power\x12\x1f\n\x02sw\x18\x01 \x01(\x0b\x32\x13.proto.cloud.Switch\"\x18\n\x07\x42\x61ttery\x12\r\n\x05level\x18\x01 \x01(\rb\x06proto3')
