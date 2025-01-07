@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import base64
 from typing import Any, Dict
 
 from homeassistant.components.vacuum import (
@@ -19,7 +18,17 @@ from .api import EufyCleanApi
 from .coordinator import EufyCleanDataUpdateCoordinator
 from .shared_connect import SharedConnect
 from .utils import decode_protobuf
-from .const import EUFY_CLEAN_CONTROL
+from .const import (
+    EUFY_CLEAN_CONTROL,
+    EUFY_CLEAN_GET_CLEAN_SPEED,
+    EUFY_CLEAN_WORK_STATUS,
+    EUFY_CLEAN_WORK_MODE,
+    EUFY_CLEAN_ERROR_CODES,
+    EUFY_CLEAN_TYPE,
+    EUFY_MOP_MODE,
+    PROTO_STATE_MAP,
+    EUFY_TO_HA_STATE,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,101 +41,6 @@ SUPPORT_EUFY_CLEAN = (
     VacuumEntityFeature.STOP |
     VacuumEntityFeature.SEND_COMMAND
 )
-
-# Map Eufy protobuf states to Home Assistant states
-PROTO_STATE_MAP = {
-    "standby": VacuumActivity.IDLE,
-    "sleep": VacuumActivity.IDLE,
-    "fault": VacuumActivity.ERROR,
-    "charging": VacuumActivity.DOCKED,
-    "fast_mapping": VacuumActivity.CLEANING,
-    "cleaning": VacuumActivity.CLEANING,
-    "remote_ctrl": VacuumActivity.CLEANING,
-    "go_home": VacuumActivity.RETURNING,
-    "cruisiing": VacuumActivity.CLEANING,
-}
-
-# Map Eufy states to Home Assistant states (for legacy API)
-EUFY_TO_HA_STATE = {
-    # Running/Cleaning states
-    "running": VacuumActivity.CLEANING,
-    "cleaning": VacuumActivity.CLEANING,
-    "spot": VacuumActivity.CLEANING,
-    "cruising": VacuumActivity.CLEANING,
-    "fast_mapping": VacuumActivity.CLEANING,
-    "remote_ctrl": VacuumActivity.CLEANING,
-    "auto": VacuumActivity.CLEANING,
-    "room": VacuumActivity.CLEANING,
-    "zone": VacuumActivity.CLEANING,
-    "edge": VacuumActivity.CLEANING,
-    "small_room": VacuumActivity.CLEANING,
-    "global_cruise": VacuumActivity.CLEANING,
-    "point_cruise": VacuumActivity.CLEANING,
-    "zones_cruise": VacuumActivity.CLEANING,
-    "scene_clean": VacuumActivity.CLEANING,
-    "1": VacuumActivity.CLEANING,  # Novel API cleaning
-
-    # Docked/Charging states
-    "charging": VacuumActivity.DOCKED,
-    "recharge": VacuumActivity.DOCKED,
-    "completed": VacuumActivity.DOCKED,
-    "standby": VacuumActivity.DOCKED,
-    "stand_by": VacuumActivity.DOCKED,
-    "2": VacuumActivity.DOCKED,  # Novel API charging
-    "4": VacuumActivity.DOCKED,  # Novel API standby
-
-    # Idle/Sleeping states
-    "sleeping": VacuumActivity.IDLE,
-    "sleep": VacuumActivity.IDLE,
-    "stopped": VacuumActivity.IDLE,
-    "no_sweep": VacuumActivity.IDLE,
-
-    # Error states
-    "fault": VacuumActivity.ERROR,
-    "error": VacuumActivity.ERROR,
-
-    # Returning states
-    "go_home": VacuumActivity.RETURNING,
-    "recharge_needed": VacuumActivity.RETURNING,
-    "exploring_station": VacuumActivity.RETURNING,
-
-    # Paused states
-    "pause": VacuumActivity.PAUSED,
-    "paused": VacuumActivity.PAUSED,
-    "3": VacuumActivity.PAUSED,  # Novel API paused
-}
-
-# Additional attributes for more detailed status
-EUFY_CLEAN_SPEED = {
-    "no_suction": "No Suction",
-    "standard": "Standard",
-    "quiet": "Quiet",
-    "turbo": "Turbo",
-    "boost_iq": "Boost IQ",
-    "max": "Max"
-}
-
-EUFY_CLEAN_MODE = {
-    "auto": "Auto",
-    "no_sweep": "No Sweep",
-    "small_room": "Small Room",
-    "room": "Room",
-    "zone": "Zone",
-    "edge": "Edge",
-    "spot": "Spot"
-}
-
-EUFY_CLEAN_TYPE = {
-    "sweep_and_mop": "Sweep and Mop",
-    "sweep_only": "Sweep Only",
-    "mop_only": "Mop Only"
-}
-
-EUFY_MOP_MODE = {
-    "high": "High",
-    "medium": "Medium",
-    "low": "Low"
-}
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -296,22 +210,159 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
             return {}
 
         dps = device.get("dps", {})
+        decoded_dps = device.get("decoded_dps", {})
         attributes = {}
 
-        # Add raw DPS data for debugging
-        attributes["raw_dps"] = dps
+        # Add device info from DPS 169
+        if "169" in decoded_dps:
+            device_info = decoded_dps["169"]
+            if isinstance(device_info, dict):
+                attributes.update({
+                    "firmware_version": device_info.get("software"),
+                    "hardware_version": device_info.get("hardware"),
+                    "wifi_ip": device_info.get("wifi_ip"),
+                    "wifi_name": device_info.get("wifi_name"),
+                    "mac_address": device_info.get("device_mac"),
+                    "station_firmware": device_info.get("station", {}).get("software"),
+                    "station_hardware": device_info.get("station", {}).get("hardware"),
+                })
 
-        # Add battery level
-        if "163" in dps:
-            attributes["battery_level"] = dps["163"]
+        # Add clean parameters from DPS 154
+        if "154" in decoded_dps:
+            clean_param = decoded_dps["154"]
+            if isinstance(clean_param, dict):
+                if "clean_type" in clean_param and clean_param["clean_type"] is not None:
+                    clean_type = clean_param["clean_type"].get("value", "").lower()
+                    attributes["clean_type"] = EUFY_CLEAN_TYPE.get(clean_type, clean_type)
+                if "fan" in clean_param and clean_param["fan"] is not None:
+                    fan_speed = clean_param["fan"].get("value", "").lower()
+                    attributes["fan_speed"] = EUFY_CLEAN_GET_CLEAN_SPEED.get(fan_speed, fan_speed)
+                if "mop_mode" in clean_param and clean_param["mop_mode"] is not None:
+                    mop_mode = clean_param["mop_mode"].get("level", "").lower()
+                    attributes["mop_mode"] = EUFY_MOP_MODE.get(mop_mode, mop_mode)
 
-        # Add cleaning state details
-        if "151" in dps:
-            attributes["cleaning_enabled"] = dps["151"]
-        if "156" in dps:
-            attributes["docked"] = dps["156"]
+        # Add work status from DPS 157
+        if "157" in decoded_dps:
+            work_status = decoded_dps["157"]
+            _LOGGER.debug("Work status from DPS 157: %s", work_status)
+            if isinstance(work_status, dict):
+                # Get mode and state
+                mode = work_status.get("mode", {})
+                state = work_status.get("state", "CHARGING")  # Default to CHARGING as per TypeScript
+                _LOGGER.debug("Work status mode: %s, state: %s", mode, state)
+
+                # Handle mode value which is a nested dict
+                mode_value = mode.get("value", "") if isinstance(mode, dict) else str(mode)
+                mode_value = mode_value.lower() if mode_value else "auto"  # Default to auto as per TypeScript
+
+                # Handle state value
+                state_value = state.lower() if state else "charging"  # Default to charging as per TypeScript
+
+                attributes.update({
+                    "cleaning_mode": EUFY_CLEAN_WORK_MODE.get(mode_value.upper(), mode_value),
+                    "cleaning_state": EUFY_CLEAN_WORK_STATUS.get(state_value.upper(), state_value),
+                })
+
+                # Handle status flags based on state
+                is_cleaning = state_value in ["running", "cleaning"]
+                is_charging = state_value in ["charging", "completed"]
+                is_returning = state_value in ["recharge", "recharge_needed", "go_home"]
+                is_washing = state_value == "go_wash"
+                is_mapping = state_value == "fast_mapping"
+
+                attributes.update({
+                    "is_charging": is_charging,
+                    "is_cleaning": is_cleaning,
+                    "is_returning_home": is_returning,
+                    "is_washing": is_washing,
+                    "is_mapping": is_mapping,
+                })
+
+        # Add cleaning statistics from DPS 177
+        if "177" in decoded_dps:
+            stats = decoded_dps["177"]
+            if isinstance(stats, dict):
+                attributes.update({
+                    "total_cleaning_time": stats.get("total"),
+                    "user_cleaning_time": stats.get("user_total"),
+                })
+
+        # Add consumable info from DPS 179
+        if "179" in decoded_dps:
+            consumable = decoded_dps["179"]
+            if isinstance(consumable, dict):
+                attributes["consumable_reset_types"] = consumable.get("reset_types", [])
+
+        # Add scene info from DPS 180
+        if "180" in decoded_dps:
+            scene = decoded_dps["180"]
+            if isinstance(scene, dict) and "scene" in scene:
+                scene_info = scene["scene"].get("info", {})
+                attributes.update({
+                    "scene_name": scene_info.get("name"),
+                    "scene_type": scene_info.get("type"),
+                    "scene_estimate_time": scene_info.get("estimate_time"),
+                })
+
+        # Add basic status flags
+        attributes.update({
+            "is_docked": dps.get("156", False),
+            "cleaning_enabled": dps.get("151", False),
+            "auto_empty_enabled": dps.get("159", False),
+            "auto_wash_enabled": dps.get("160", False),
+        })
+
+        # Add error information if present
+        error_code = dps.get("161", 0)
+        if error_code > 0:
+            error_message = EUFY_CLEAN_ERROR_CODES.get(error_code, f"Unknown error {error_code}")
+            attributes.update({
+                "error_code": error_code,
+                "error_message": error_message,
+            })
 
         return attributes
+
+    @property
+    def activity(self) -> VacuumActivity:
+        """Return the activity of the vacuum cleaner."""
+        device = self._device
+        if not device:
+            return VacuumActivity.ERROR
+
+        dps = device.get("dps", {})
+        decoded_dps = device.get("decoded_dps", {})
+
+        # Check for errors first
+        if dps.get("161", 0) > 0:
+            return VacuumActivity.ERROR
+
+        # First check if we have decoded work status from DPS 157
+        if "157" in decoded_dps:
+            work_status = decoded_dps["157"]
+            if isinstance(work_status, dict):
+                # Check if docked/charging
+                if dps.get("156", False):  # DPS 156 indicates if docked
+                    if work_status.get("charging"):
+                        return VacuumActivity.DOCKED
+                    return VacuumActivity.IDLE
+
+                # Get the main state
+                state = work_status.get("state", "").lower()
+                if state in PROTO_STATE_MAP:
+                    return PROTO_STATE_MAP[state]
+
+                # Check specific work modes
+                if work_status.get("cleaning"):
+                    return VacuumActivity.CLEANING
+                if work_status.get("go_home"):
+                    return VacuumActivity.RETURNING
+                if work_status.get("go_wash"):
+                    return VacuumActivity.RETURNING
+
+        # Fallback to DPS 158 for legacy state handling
+        state = dps.get("158", "").lower()
+        return EUFY_TO_HA_STATE.get(state, VacuumActivity.ERROR)
 
     @property
     def battery_level(self) -> int | None:
@@ -325,60 +376,52 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
         device = self._device
         return bool(device.get("is_online", False))
 
-    @property
-    def activity(self) -> VacuumActivity:
-        """Return the activity of the vacuum cleaner."""
-        device = self._device
-        if not device:
-            return VacuumActivity.ERROR
-
-        dps = device.get("dps", {})
-
-        # Get state from DPS 158 (main state)
-        state = dps.get("158", "").lower()
-
-        # Check if the vacuum is docked/charging
-        if dps.get("156", False):  # DPS 156 indicates if docked
-            return VacuumActivity.DOCKED
-
-        # If not docked, then check the main state
-        if state == "1":
-            if dps.get("151", False):  # If cleaning enabled
-                return VacuumActivity.CLEANING
-            return VacuumActivity.IDLE
-        elif state == "2":
-            return VacuumActivity.RETURNING
-        elif state == "3":
-            return VacuumActivity.PAUSED
-        elif state == "4":
-            return VacuumActivity.IDLE
-
-        # Fallback to legacy state mapping
-        return EUFY_TO_HA_STATE.get(state, VacuumActivity.ERROR)
-
     async def async_start(self) -> None:
         """Start or resume the cleaning task."""
-        await self._shared_connect.send_command(self._device_id, {
-            "method": EUFY_CLEAN_CONTROL["RESUME_TASK"]
+        value = True
+        if self._shared_connect.novel_api:
+            value = {
+                "method": EUFY_CLEAN_CONTROL["RESUME_TASK"]
+            }
+        await self._shared_connect.send_command({
+            self._shared_connect.dps_map["PLAY_PAUSE"]: value
         })
 
     async def async_pause(self) -> None:
         """Pause the cleaning task."""
-        await self._shared_connect.send_command(self._device_id, {
-            "method": EUFY_CLEAN_CONTROL["PAUSE_TASK"]
+        value = False
+        if self._shared_connect.novel_api:
+            value = {
+                "method": EUFY_CLEAN_CONTROL["PAUSE_TASK"]
+            }
+        await self._shared_connect.send_command({
+            self._shared_connect.dps_map["PLAY_PAUSE"]: value
         })
 
     async def async_stop(self) -> None:
         """Stop the cleaning task."""
-        await self._shared_connect.send_command(self._device_id, {
-            "method": EUFY_CLEAN_CONTROL["STOP_TASK"]
+        value = False
+        if self._shared_connect.novel_api:
+            value = {
+                "method": EUFY_CLEAN_CONTROL["STOP_TASK"]
+            }
+        await self._shared_connect.send_command({
+            self._shared_connect.dps_map["PLAY_PAUSE"]: value
         })
 
     async def async_return_to_base(self) -> None:
         """Set the vacuum cleaner to return to the dock."""
-        await self._shared_connect.send_command(self._device_id, {
-            "method": EUFY_CLEAN_CONTROL["START_GOHOME"]
-        })
+        if self._shared_connect.novel_api:
+            value = {
+                "method": EUFY_CLEAN_CONTROL["START_GOHOME"]
+            }
+            await self._shared_connect.send_command({
+                self._shared_connect.dps_map["PLAY_PAUSE"]: value
+            })
+        else:
+            await self._shared_connect.send_command({
+                self._shared_connect.dps_map["GO_HOME"]: True
+            })
 
     async def async_send_command(
         self,
@@ -390,8 +433,17 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
         if params is None:
             params = {}
 
-        await self._shared_connect.send_command(self._device_id, {
-            "method": command,
-            **params
-        })
+        if self._shared_connect.novel_api:
+            value = {
+                "method": command,
+                **params
+            }
+            await self._shared_connect.send_command({
+                self._shared_connect.dps_map["PLAY_PAUSE"]: value
+            })
+        else:
+            await self._shared_connect.send_command({
+                self._shared_connect.dps_map["PLAY_PAUSE"]: command,
+                **params
+            })
 
