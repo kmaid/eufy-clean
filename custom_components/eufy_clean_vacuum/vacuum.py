@@ -91,7 +91,8 @@ async def async_setup_entry(
                 _LOGGER.debug("Device %s already added, skipping duplicate", device_id)
                 continue
 
-            device_model = device.get("deviceModel", "")
+            _LOGGER.debug("Processing device data: %s", device)
+            device_model = device.get("product_code", "")
             device_name = device.get("deviceName", "")
 
             _LOGGER.info(
@@ -100,17 +101,23 @@ async def async_setup_entry(
                 device_name or "Unknown",
                 device_model or "Unknown"
             )
+            _LOGGER.debug("Device fields - product_code: %s, deviceModel: %s",
+                         device.get("product_code"), device.get("deviceModel"))
 
             config = {
                 "device_id": device_id,
                 "device_model": device_model,
                 "debug": False,
             }
+            _LOGGER.debug("Creating SharedConnect with config: %s", config)
             shared_connect = SharedConnect(config)
 
             # Set up MQTT connection
             if api.login.mqtt_connect:
                 _LOGGER.info("Setting up MQTT connection for device %s", device_id)
+                _LOGGER.debug("MQTT connect object has devices: %s", hasattr(api.login.mqtt_connect, 'devices'))
+                if hasattr(api.login.mqtt_connect, 'devices'):
+                    _LOGGER.debug("MQTT devices: %s", api.login.mqtt_connect.devices)
                 await shared_connect.set_mqtt_connect(api.login.mqtt_connect)
             else:
                 _LOGGER.warning("No MQTT connection available for device %s", device_id)

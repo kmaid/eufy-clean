@@ -10,7 +10,7 @@ from google.protobuf.message import Message
 import importlib
 from pathlib import Path
 from google.protobuf import descriptor_pool as _descriptor_pool
-from google.protobuf import message_factory
+from google.protobuf.message_factory import GetMessageClass
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +47,14 @@ DPS_PROTO_MAP = {
 
 # Pre-load all protobuf modules
 _PROTO_MODULES = {}
-_MESSAGE_FACTORY = message_factory.MessageFactory()
+_DESCRIPTOR_POOL = _descriptor_pool.Default()
+
+def load_proto_descriptors():
+    """Load proto descriptors."""
+    proto_dir = Path(__file__).parent / "proto"
+    for file in proto_dir.glob("**/*.desc"):
+        with open(file, "rb") as f:
+            _DESCRIPTOR_POOL.Add(f.read())
 
 def _load_proto_modules():
     """Pre-load all protobuf modules and register their descriptors with the global descriptor pool."""
@@ -87,7 +94,7 @@ def get_proto_class(proto_path: str, message_type: str) -> Type[Message]:
         descriptor = getattr(module, message_type)
 
         # Create the message class from the descriptor
-        message_class = _MESSAGE_FACTORY.GetPrototype(descriptor.DESCRIPTOR)
+        message_class = GetMessageClass(descriptor.DESCRIPTOR)
         if not message_class:
             raise ValueError(f"Failed to create message class for {message_type}")
 
@@ -150,7 +157,7 @@ async def decode_protobuf(proto_module: str, message_type: str, data: str) -> Op
         return None
 
 def encode(proto_path: str, message_type: str, data: Dict[str, Any]) -> str:
-    """Encode a dictionary to a base64 encoded protobuf message."""
+    """Encode a dictionary to a base64 encoded length-delimited protobuf message."""
     try:
         # Get the protobuf class
         proto_class = get_proto_class(proto_path, message_type)
@@ -159,13 +166,29 @@ def encode(proto_path: str, message_type: str, data: Dict[str, Any]) -> str:
         message = proto_class()
         dict_to_message(data, message)
 
-        # Serialize the message
-        buffer = message.SerializeToString()
+        # Get the size of the message
+        size = message.ByteSize()
+        _LOGGER.debug("Message size: %d bytes", size)
+
+        # Create a buffer to hold the length-delimited message
+        from google.protobuf.internal.encoder import _VarintBytes
+        from io import BytesIO
+
+        # Create a buffer with the length prefix
+        buffer = BytesIO()
+        buffer.write(_VarintBytes(size))
+        buffer.write(message.SerializeToString())
+
+        # Get the complete buffer
+        result = buffer.getvalue()
+        _LOGGER.debug("Encoded message (hex): %s", result.hex())
 
         # Encode to base64
-        return base64.b64encode(buffer).decode('utf-8')
+        encoded = base64.b64encode(result).decode('utf-8')
+        _LOGGER.debug("Base64 encoded result: %s", encoded)
+        return encoded
     except Exception as e:
-        _LOGGER.error(f"Failed to encode protobuf message: {e}")
+        _LOGGER.error("Failed to encode protobuf message: %s", e, exc_info=True)
         return None
 
 def message_to_dict(message: Message) -> Dict[str, Any]:
@@ -263,3 +286,14 @@ def get_multi_data(proto_path: str, message_type: str, base64_value: str) -> Lis
         else:
             result.append({"key": key, "value": value})
     return result
+
+def decode_proto_message(descriptor, data):
+    """Decode a proto message."""
+    try:
+        message_class = GetMessageClass(descriptor.DESCRIPTOR)
+        message = message_class()
+        message.ParseFromString(data)
+        return message
+    except Exception as ex:  # pylint: disable=broad-except
+        _LOGGER.error("Failed to decode proto message: %s", ex)
+        return None
