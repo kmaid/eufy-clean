@@ -8,12 +8,7 @@ from typing import Any, Dict
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
     VacuumEntityFeature,
-    STATE_CLEANING,
-    STATE_DOCKED,
-    STATE_ERROR,
-    STATE_IDLE,
-    STATE_PAUSED,
-    STATE_RETURNING,
+    VacuumActivity,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -24,8 +19,7 @@ from .api import EufyCleanApi
 from .coordinator import EufyCleanDataUpdateCoordinator
 from .shared_connect import SharedConnect
 from .utils import decode_protobuf
-from .proto.cloud import work_status_pb2
-from .constants import EUFY_CLEAN_CONTROL
+from .const import EUFY_CLEAN_CONTROL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,71 +28,72 @@ SUPPORT_EUFY_CLEAN = (
     VacuumEntityFeature.PAUSE |
     VacuumEntityFeature.RETURN_HOME |
     VacuumEntityFeature.START |
-    VacuumEntityFeature.STATE |
-    VacuumEntityFeature.STOP
+    VacuumEntityFeature.STATUS |
+    VacuumEntityFeature.STOP |
+    VacuumEntityFeature.SEND_COMMAND
 )
 
 # Map Eufy protobuf states to Home Assistant states
 PROTO_STATE_MAP = {
-    "standby": STATE_IDLE,
-    "sleep": STATE_IDLE,
-    "fault": STATE_ERROR,
-    "charging": STATE_DOCKED,
-    "fast_mapping": STATE_CLEANING,
-    "cleaning": STATE_CLEANING,
-    "remote_ctrl": STATE_CLEANING,
-    "go_home": STATE_RETURNING,
-    "cruisiing": STATE_CLEANING,
+    "standby": VacuumActivity.IDLE,
+    "sleep": VacuumActivity.IDLE,
+    "fault": VacuumActivity.ERROR,
+    "charging": VacuumActivity.DOCKED,
+    "fast_mapping": VacuumActivity.CLEANING,
+    "cleaning": VacuumActivity.CLEANING,
+    "remote_ctrl": VacuumActivity.CLEANING,
+    "go_home": VacuumActivity.RETURNING,
+    "cruisiing": VacuumActivity.CLEANING,
 }
 
 # Map Eufy states to Home Assistant states (for legacy API)
 EUFY_TO_HA_STATE = {
     # Running/Cleaning states
-    "running": STATE_CLEANING,
-    "cleaning": STATE_CLEANING,
-    "spot": STATE_CLEANING,
-    "cruising": STATE_CLEANING,
-    "fast_mapping": STATE_CLEANING,
-    "remote_ctrl": STATE_CLEANING,
-    "auto": STATE_CLEANING,
-    "room": STATE_CLEANING,
-    "zone": STATE_CLEANING,
-    "edge": STATE_CLEANING,
-    "small_room": STATE_CLEANING,
-    "global_cruise": STATE_CLEANING,
-    "point_cruise": STATE_CLEANING,
-    "zones_cruise": STATE_CLEANING,
-    "scene_clean": STATE_CLEANING,
-    "1": STATE_CLEANING,  # Novel API cleaning
+    "running": VacuumActivity.CLEANING,
+    "cleaning": VacuumActivity.CLEANING,
+    "spot": VacuumActivity.CLEANING,
+    "cruising": VacuumActivity.CLEANING,
+    "fast_mapping": VacuumActivity.CLEANING,
+    "remote_ctrl": VacuumActivity.CLEANING,
+    "auto": VacuumActivity.CLEANING,
+    "room": VacuumActivity.CLEANING,
+    "zone": VacuumActivity.CLEANING,
+    "edge": VacuumActivity.CLEANING,
+    "small_room": VacuumActivity.CLEANING,
+    "global_cruise": VacuumActivity.CLEANING,
+    "point_cruise": VacuumActivity.CLEANING,
+    "zones_cruise": VacuumActivity.CLEANING,
+    "scene_clean": VacuumActivity.CLEANING,
+    "1": VacuumActivity.CLEANING,  # Novel API cleaning
 
     # Docked/Charging states
-    "charging": STATE_DOCKED,
-    "recharge": STATE_DOCKED,
-    "completed": STATE_DOCKED,
-    "standby": STATE_DOCKED,
-    "stand_by": STATE_DOCKED,
-    "2": STATE_DOCKED,  # Novel API charging
-    "4": STATE_DOCKED,  # Novel API standby
+    "charging": VacuumActivity.DOCKED,
+    "recharge": VacuumActivity.DOCKED,
+    "completed": VacuumActivity.DOCKED,
+    "standby": VacuumActivity.DOCKED,
+    "stand_by": VacuumActivity.DOCKED,
+    "2": VacuumActivity.DOCKED,  # Novel API charging
+    "4": VacuumActivity.DOCKED,  # Novel API standby
 
     # Idle/Sleeping states
-    "sleeping": STATE_IDLE,
-    "sleep": STATE_IDLE,
-    "stopped": STATE_IDLE,
-    "no_sweep": STATE_IDLE,
+    "sleeping": VacuumActivity.IDLE,
+    "sleep": VacuumActivity.IDLE,
+    "stopped": VacuumActivity.IDLE,
+    "no_sweep": VacuumActivity.IDLE,
 
     # Error states
-    "fault": STATE_ERROR,
-    "error": STATE_ERROR,
+    "fault": VacuumActivity.ERROR,
+    "error": VacuumActivity.ERROR,
 
     # Returning states
-    "go_home": STATE_RETURNING,
-    "recharge_needed": STATE_RETURNING,
-    "exploring_station": STATE_RETURNING,
+    "go_home": VacuumActivity.RETURNING,
+    "recharge_needed": VacuumActivity.RETURNING,
+    "exploring_station": VacuumActivity.RETURNING,
 
     # Paused states
-    "pause": STATE_PAUSED,
-    "paused": STATE_PAUSED,
-    "3": STATE_PAUSED,  # Novel API paused
+    "pause": VacuumActivity.PAUSED,
+    "paused": VacuumActivity.PAUSED,
+    "3": VacuumActivity.PAUSED,  # Novel API paused
 }
 
 # Additional attributes for more detailed status
@@ -331,11 +326,11 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
         return bool(device.get("is_online", False))
 
     @property
-    def state(self) -> str:
-        """Return the state of the vacuum cleaner."""
+    def activity(self) -> VacuumActivity:
+        """Return the activity of the vacuum cleaner."""
         device = self._device
         if not device:
-            return STATE_ERROR
+            return VacuumActivity.ERROR
 
         dps = device.get("dps", {})
 
@@ -344,22 +339,22 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
 
         # Check if the vacuum is docked/charging
         if dps.get("156", False):  # DPS 156 indicates if docked
-            return STATE_DOCKED
+            return VacuumActivity.DOCKED
 
         # If not docked, then check the main state
         if state == "1":
             if dps.get("151", False):  # If cleaning enabled
-                return STATE_CLEANING
-            return STATE_IDLE
+                return VacuumActivity.CLEANING
+            return VacuumActivity.IDLE
         elif state == "2":
-            return STATE_RETURNING
+            return VacuumActivity.RETURNING
         elif state == "3":
-            return STATE_PAUSED
+            return VacuumActivity.PAUSED
         elif state == "4":
-            return STATE_IDLE
+            return VacuumActivity.IDLE
 
         # Fallback to legacy state mapping
-        return EUFY_TO_HA_STATE.get(state, STATE_ERROR)
+        return EUFY_TO_HA_STATE.get(state, VacuumActivity.ERROR)
 
     async def async_start(self) -> None:
         """Start or resume the cleaning task."""
@@ -383,5 +378,20 @@ class EufyCleanVacuum(CoordinatorEntity[EufyCleanDataUpdateCoordinator], StateVa
         """Set the vacuum cleaner to return to the dock."""
         await self._shared_connect.send_command(self._device_id, {
             "method": EUFY_CLEAN_CONTROL["START_GOHOME"]
+        })
+
+    async def async_send_command(
+        self,
+        command: str,
+        params: dict[str, Any] | list[Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Send a command to the vacuum."""
+        if params is None:
+            params = {}
+
+        await self._shared_connect.send_command(self._device_id, {
+            "method": command,
+            **params
         })
 

@@ -1,16 +1,25 @@
-"""Fix protobuf imports in generated files."""
+#!/usr/bin/env python3
+"""Script to fix protobuf imports in generated pb2 files."""
 import os
 import re
+from pathlib import Path
 
-def fix_imports(file_path: str) -> None:
-    """Fix imports in a single file."""
+def fix_imports(file_path: Path) -> None:
+    """Fix imports in a protobuf file."""
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # Replace 'from proto.cloud' with relative import
+    # Replace imports from proto.cloud to use the full package path
     content = re.sub(
-        r'from proto\.cloud import (\w+)',
-        r'from . import \1',
+        r'from proto\.cloud import (\w+) as proto_dot_cloud_dot_(\w+)__pb2',
+        r'from custom_components.eufy_clean_vacuum.proto.cloud import \1 as proto_dot_cloud_dot_\2__pb2',
+        content
+    )
+
+    # Replace the source path in the generated comment
+    content = re.sub(
+        r'# source: proto/cloud/(.+)\.proto',
+        r'# source: custom_components/eufy_clean_vacuum/proto/cloud/\1.proto',
         content
     )
 
@@ -18,17 +27,15 @@ def fix_imports(file_path: str) -> None:
         f.write(content)
 
 def main():
-    """Fix imports in all protobuf files."""
+    """Main function."""
     # Get the directory containing this script
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    proto_dir = os.path.join(current_dir, 'proto', 'cloud')
+    script_dir = Path(__file__).parent
+    proto_dir = script_dir / 'proto' / 'cloud'
 
-    # Process all Python files in the proto directory
-    for filename in os.listdir(proto_dir):
-        if filename.endswith('_pb2.py'):
-            file_path = os.path.join(proto_dir, filename)
-            print(f"Fixing imports in {filename}")
-            fix_imports(file_path)
+    # Process all pb2 files
+    for pb2_file in proto_dir.glob('*_pb2.py'):
+        print(f"Processing {pb2_file}")
+        fix_imports(pb2_file)
 
 if __name__ == '__main__':
     main()
